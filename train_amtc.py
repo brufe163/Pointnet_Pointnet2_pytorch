@@ -17,7 +17,8 @@ import provider
 import numpy as np
 import time
 import matplotlib.pyplot as plt
-
+from sklearn.metrics import classification_report
+import zipfile
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
@@ -38,7 +39,7 @@ def inplace_relu(m):
 def parse_args():
     parser = argparse.ArgumentParser('Model')
     parser.add_argument('--model', type=str, default='pointnet2_sem_seg_amtc', help='model name [default: pointnet_sem_seg]')
-    parser.add_argument('--data_dir', type=str, default='/home/nicolas/repos/dust-filtering/data/blender_areas', help='Data path [default: None]')
+    parser.add_argument('--data_dir', type=str, default='/home/nicolas/repos/custom_pointnet2_pytorch/data/blender_areas', help='Data path [default: None]')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch Size during training [default: 16]')
     parser.add_argument('--nclasses', type=int, default=2, help='number of classes of the data [default: 13]')
     parser.add_argument('--epoch', default=32, type=int, help='Epoch to run [default: 32]')
@@ -57,6 +58,29 @@ def parse_args():
 
 import matplotlib.pyplot as plt
 import os
+
+curr_dir = os.getcwd()
+data = os.path.join(curr_dir, 'data', 'blender_areas')
+
+def data_downloader(data):
+    assert args.data_dir == data, 'data_dir no es la correcta. Revisar que coincida con los archivos requeridos.'
+    import gdown
+    url = 'https://drive.google.com/file/d/1BZQkZHaSDga89u8YD3j5CRVV4o4dVfe7/view?usp=drive_link'
+    zip_filename = 'blender_areas.zip'
+
+    parent_dir = os.path.abspath(os.path.join(data, os.pardir))
+    if not os.path.exists(parent_dir):
+        os.makedirs(parent_dir)
+    print("Downloading file from Google Drive...")
+    zip_path = os.path.join(parent_dir, zip_filename)
+    gdown.download(url, zip_path, quiet=False, fuzzy=True)
+    print(f"Extracting the ZIP file to {parent_dir}...")
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(parent_dir)
+    os.remove(zip_path)
+
+    
+    
 
 def plot_loss_and_iou(train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir):
     epochs = range(1, len(train_loss_history) + 1)
@@ -146,16 +170,18 @@ def main(args):
     print("start loading training data ...")
     TRAIN_DATASET = AMTCDataset(split='train', data_root=ROOT, num_point=None, test_area=TEST_AREA, block_size=1.0, sample_rate=1.0, feats = FEATS, num_classes = NUM_CLASSES, transform=None)
     print("start loading test data ...")
-    TEST_DATASET = AMTCDataset(split='test', data_root=ROOT, num_point=None, test_area=TEST_AREA, block_size=1.0, sample_rate=1.0,feats = FEATS, num_classes = NUM_CLASSES, transform=None)
-
+    # TEST_DATASET = AMTCDataset(split='test', data_root=ROOT, num_point=None, test_area=TEST_AREA, block_size=1.0, sample_rate=1.0,feats = FEATS, num_classes = NUM_CLASSES, transform=None)
+    TEST_DATASET = TRAIN_DATASET    # sanity checkl
     NUM_FEATS = TRAIN_DATASET.num_feats
     NUM_POINT = TRAIN_DATASET.num_point
 
     trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=BATCH_SIZE, shuffle=True, num_workers=10,
                                                   pin_memory=True, drop_last=True,
                                                   worker_init_fn=lambda x: np.random.seed(x + int(time.time())))
-    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=BATCH_SIZE, shuffle=False, num_workers=10,
-                                                 pin_memory=True, drop_last=True)
+    # testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=BATCH_SIZE, shuffle=False, num_workers=10,
+    #                                              pin_memory=True, drop_last=True)
+    testDataLoader = trainDataLoader    # SANITY CHECK  (VEAMOS SI APRENDE A SOBREAJUSTARSE)
+
     weights = torch.Tensor(TRAIN_DATASET.labelweights).cuda()
 
     log_string("The number of training data is: %d" % len(TRAIN_DATASET))
@@ -255,9 +281,11 @@ def main(args):
                 seg_pred = seg_pred.contiguous().view(-1, NUM_CLASSES)
 
                 batch_label = target.view(-1, 1)[:, 0].cpu().data.numpy()
-                # print('batch_label: ', batch_label, np.shape(batch_label))
+                # print(f'Forma original de target: {target.shape}')
+                # print(f'Primeras etiquetas antes de view: {target[:5]}')
                 target = target.view(-1, 1)[:, 0]
-                #  print('target despues de view: ', target.cpu().numpy(),target.shape)
+                # print(f'Forma de target después de view: {target.shape}')
+                # print(f'Primeras etiquetas después de view: {target[:5]}')
                 loss = criterion(seg_pred, target, trans_feat, weights)
                 loss.backward()
                 optimizer.step()
@@ -293,6 +321,9 @@ def main(args):
                 log_string('Saving model....')
 
             '''Evaluate on chopped scenes'''
+            all_pred_labels = []
+            all_true_labels = []
+
             with torch.no_grad():
                 num_batches = len(testDataLoader)
                 total_correct = 0
@@ -319,12 +350,23 @@ def main(args):
                     target = target.view(-1, 1)[:, 0]
                     loss = criterion(seg_pred, target, trans_feat, weights)
                     loss_sum += loss
+
+                    
+
+                    # print(f'Forma de pred_val antes de np.argmax: {pred_val.shape}')
+
                     pred_val = np.argmax(pred_val, 2)
                     correct = np.sum((pred_val == batch_label))
                     total_correct += correct
                     total_seen += (BATCH_SIZE * NUM_POINT)
+                    
+                    # print(f'Forma de batch_label: {batch_label.shape}')
+                    # print(f'Valores únicos en batch_label: {np.unique(batch_label)}')
                     tmp, _ = np.histogram(batch_label, range(NUM_CLASSES + 1))
+
                     labelweights += tmp
+                    all_pred_labels.append(pred_val.flatten())  # Aplana para tener un vector de predicciones
+                    all_true_labels.append(batch_label.flatten())  # Aplana para tener un vector de etiquetas verdaderas
 
                     for l in range(NUM_CLASSES):
                         total_seen_class[l] += np.sum((batch_label == l))  # Total de puntos en la clase l
@@ -333,8 +375,11 @@ def main(args):
 
                     # Añadir límite mínimo para evitar divisiones pequeñas
                     total_iou_deno_class = np.maximum(total_iou_deno_class, 1e-6)
-
+                
                 labelweights = labelweights.astype(np.float32) / np.sum(labelweights.astype(np.float32))
+                print('total_correct_class: ', np.array(total_correct_class))
+                print('total_iou_deno_class: ', total_iou_deno_class)
+
                 mIoU = np.mean(np.array(total_correct_class) / total_iou_deno_class)
                 log_string('eval mean loss: %f' % (loss_sum / float(num_batches)))
                 log_string('eval point avg class IoU: %f' % (mIoU))
@@ -349,9 +394,9 @@ def main(args):
 
                 iou_per_class_str = '------- IoU --------\n'
                 for l in range(NUM_CLASSES):
-                    iou_per_class_str += 'class %s weight: %.3f, IoU: %.3f \n' % (
+                    iou_per_class_str += 'class %s weight: %.3f, IoU: %.3f, acc: %.3f \n' % (
                         seg_label_to_cat[l] + ' ' * (NUM_CLASSES + 1 - len(seg_label_to_cat[l])), labelweights[l - 1],
-                        total_correct_class[l] / float(total_iou_deno_class[l]))
+                        total_correct_class[l] / float(total_iou_deno_class[l]), total_correct_class[l] / (total_seen_class[l] + 1e-6))
 
                 log_string(iou_per_class_str)
                 log_string('Eval mean loss: %f' % (loss_sum / num_batches))
@@ -387,6 +432,10 @@ def main(args):
                     log_string('Saving model....')
                 log_string('Best mIoU: %f' % best_iou)
             global_epoch += 1
+            all_pred_labels = np.concatenate(all_pred_labels)
+            all_true_labels = np.concatenate(all_true_labels)
+
+            print(classification_report(all_true_labels, all_pred_labels, target_names=['dust', 'non-dust']))
     except KeyboardInterrupt:
         print("Entrenamiento interrumpido por el usuario. Generando gráfico...")
         return train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir
@@ -395,6 +444,9 @@ def main(args):
 
 if __name__ == '__main__':
     args = parse_args()
-    train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir = main(args)
+    if not os.path.exists(args.data_dir) or not os.listdir(args.data_dir):
+        data_downloader(args.data_dir)
+    
+    #train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir = main(args)
 
-    plot_loss_and_iou(train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir)
+    #plot_loss_and_iou(train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir)

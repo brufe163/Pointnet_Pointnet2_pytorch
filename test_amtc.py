@@ -74,8 +74,9 @@ def vis_result(coord, classes):
 
 def model_eval(model, root = '', feat = ['coord','intensity'], num_classes = 2, data_set = 'test'):    # Para PointNet++
 
-    DATASET = AMTCDataset(split=data_set, data_root=root, num_point=None, test_area=5, block_size=1, sample_rate=1, feats = feat, transform=None, num_classes = num_classes)
+    DATASET = AMTCDataset(split='train', data_root=root, num_point=None, test_area=5, block_size=1, sample_rate=1, feats = feat, transform=None, num_classes = num_classes)
     idx = random.randint(0, DATASET.__len__())
+    idx = 0
 
     
     data, labels, r_idx = DATASET.__getitem__(idx, return_index = True)
@@ -99,8 +100,9 @@ def model_eval(model, root = '', feat = ['coord','intensity'], num_classes = 2, 
     vis_result(data[:,:3],predicted_classes.cpu().numpy())
 
 def vis_data(root, data_set):
-    DATASET = AMTCDataset(split=data_set, data_root=root, num_point=None, test_area=5, block_size=1, sample_rate=1, feats = args.feat_list, transform=None, num_classes = 2)
+    DATASET = AMTCDataset(split='train', data_root=root, num_point=None, test_area=5, block_size=1, sample_rate=1, feats = args.feat_list, transform=None, num_classes = 2)
     idx = random.randint(0, DATASET.__len__())
+    idx = 0
     print(idx)
     data, labels= DATASET.room_points[idx], DATASET.room_labels[idx]
 
@@ -111,7 +113,7 @@ def main(args):
     model, NUM_CLASSES, NUM_FEAT = ptnt2_loader(args.checkpoint_dir)
     print(NUM_FEAT)
     model_eval(model, root = args.root_dir,feat = args.feat_list, num_classes = NUM_CLASSES, data_set = args.eval_set)
-    #vis_data(args.root_dir, args.eval_set)
+    vis_data(args.root_dir, args.eval_set)
 
 
 
@@ -119,7 +121,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Visualize processed pointclouds with classes.')
     parser.add_argument('--root-dir', type=str, default='/home/nicolas/repos/dust-filtering/data/blender_areas', 
                         help='Data root path [default: None]')
-    parser.add_argument('--checkpoint-dir', type=str, default='/home/nicolas/repos/pointnet2_pytorch_orig/log/sem_seg_amtc/2024-09-12_11-43/checkpoints/best_model_iou.pth', 
+    parser.add_argument('--checkpoint-dir', type=str, default='/home/nicolas/repos/pointnet2_pytorch_orig/log/sem_seg_amtc/2024-09-12_16-42/checkpoints/best_model_iou.pth', 
                         help='Checkpoint file dir path')
     parser.add_argument('--feat-list', nargs='+', default=["coord", "intensity"], help='list of the desired features to consider [default: ["coord", "color"]]')
     parser.add_argument('--eval-set', type=str, choices=['test', 'train'], default='test',
