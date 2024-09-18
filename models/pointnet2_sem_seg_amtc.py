@@ -16,7 +16,6 @@ class get_model(nn.Module):
         self.fp1 = PointNetFeaturePropagation(128, [128, 128, 128])
         self.conv1 = nn.Conv1d(128, 128, 1)
         self.bn1 = nn.BatchNorm1d(128)
-        self.drop1 = nn.Dropout(0.5)
         self.conv2 = nn.Conv1d(128, num_classes, 1)
 
     def forward(self, xyz):
@@ -33,7 +32,7 @@ class get_model(nn.Module):
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
         l0_points = self.fp1(l0_xyz, l1_xyz, None, l1_points)
 
-        x = self.drop1(F.relu(self.bn1(self.conv1(l0_points))))
+        x = F.relu(self.bn1(self.conv1(l0_points)))
         x = self.conv2(x)
         x = F.log_softmax(x, dim=1)
         x = x.permute(0, 2, 1)
