@@ -41,8 +41,8 @@ def parse_args():
     parser.add_argument('--model', type=str, default='pointnet2_sem_seg_amtc', help='model name [default: pointnet_sem_seg]')
     parser.add_argument('--data_dir', type=str, default='/home/nicolas/repos/custom_pointnet2_pytorch/data/blender_areas', help='Data path [default: None]')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch Size during training [default: 16]')
-    parser.add_argument('--nclasses', type=int, default=2, help='number of classes of the data [default: 13]')
-    parser.add_argument('--epoch', default=32, type=int, help='Epoch to run [default: 32]')
+    parser.add_argument('--nclasses', type=int, default=2, help='number of classes of the data [default: 2]')
+    parser.add_argument('--epoch', default=20, type=int, help='Epoch to run [default: 20]')
     parser.add_argument('--learning_rate', default=0.001, type=float, help='Initial learning rate [default: 0.001]')
     parser.add_argument('--gpu', type=str, default='0', help='GPU to use [default: GPU 0]')
     parser.add_argument('--optimizer', type=str, default='Adam', help='Adam or SGD [default: Adam]')
@@ -79,7 +79,34 @@ def data_downloader(data):
         zip_ref.extractall(parent_dir)
     os.remove(zip_path)
 
-    
+
+def collate_fn(batch):
+    """
+    Custom collate function to pad the point clouds so they all have the same number of points in a batch.
+    """
+    # Encuentra la cantidad máxima de puntos en el batch
+    max_points = max(points.shape[0] for points, _ in batch)
+
+    # Lista para almacenar las pointclouds y las etiquetas
+    points_padded = []
+    labels_padded = []
+
+    for points, labels in batch:
+        # Padding de los puntos
+        padded_points = np.pad(points, ((0, max_points - points.shape[0]), (0, 0)), mode='constant')
+        points_padded.append(padded_points)
+
+        # Padding de las etiquetas
+        padded_labels = np.pad(labels, (0, max_points - labels.shape[0]), mode='constant')
+        labels_padded.append(padded_labels)
+
+    # Convertir las listas en tensores
+    return torch.tensor(points_padded), torch.tensor(labels_padded)
+
+
+# Ahora asegúrate de que en el DataLoader utilizas la función `collate_fn`:
+from torch.utils.data import DataLoader
+
     
 
 def plot_loss_and_iou(train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir):
@@ -168,19 +195,21 @@ def main(args):
     FEATS = args.feat_list
 
     print("start loading training data ...")
-    TRAIN_DATASET = AMTCDataset(split='train', data_root=ROOT, num_point=None, test_area=TEST_AREA, block_size=1.0, sample_rate=1.0, feats = FEATS, num_classes = NUM_CLASSES, transform=None)
+    TRAIN_DATASET = AMTCDataset(split='train', data_root=ROOT, num_point=5000, voxel_size=0.1, test_area=TEST_AREA, feats = FEATS, num_classes = NUM_CLASSES)
     print("start loading test data ...")
-    # TEST_DATASET = AMTCDataset(split='test', data_root=ROOT, num_point=None, test_area=TEST_AREA, block_size=1.0, sample_rate=1.0,feats = FEATS, num_classes = NUM_CLASSES, transform=None)
-    TEST_DATASET = TRAIN_DATASET    # sanity checkl
+    TEST_DATASET = AMTCDataset(split='test', data_root=ROOT, num_point=5000, voxel_size=0.1, test_area=TEST_AREA,feats = FEATS, num_classes = NUM_CLASSES)
+    
     NUM_FEATS = TRAIN_DATASET.num_feats
     NUM_POINT = TRAIN_DATASET.num_point
 
-    trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=BATCH_SIZE, shuffle=True, num_workers=10,
-                                                  pin_memory=True, drop_last=True,
+    trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=BATCH_SIZE, shuffle=True, num_workers=8,
+                                                  pin_memory=True, drop_last=True,collate_fn=collate_fn,
                                                   worker_init_fn=lambda x: np.random.seed(x + int(time.time())))
-    # testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=BATCH_SIZE, shuffle=False, num_workers=10,
-    #                                              pin_memory=True, drop_last=True)
-    testDataLoader = trainDataLoader    # SANITY CHECK  (VEAMOS SI APRENDE A SOBREAJUSTARSE)
+    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=BATCH_SIZE, shuffle=False, num_workers=8,
+                                                  pin_memory=True, drop_last=True, collate_fn=collate_fn)
+    
+    #TEST_DATASET = TRAIN_DATASET    # SANITY CHECK  (VEAMOS SI APRENDE A SOBREAJUSTARSE)
+    #testDataLoader = trainDataLoader    # SANITY CHECK  (VEAMOS SI APRENDE A SOBREAJUSTARSE)
 
     weights = torch.Tensor(TRAIN_DATASET.labelweights).cuda()
 
@@ -271,7 +300,7 @@ def main(args):
                 #  print('target al inicio: ', target.cpu().numpy(), target.shape)
 
                 points = points.data.numpy()
-                points[:, :, :3] = provider.rotate_point_cloud_z(points[:, :, :3])
+                #points[:, :, :3] = provider.rotate_point_cloud_z(points[:, :, :3])
                 points = torch.Tensor(points)
                 points, target = points.float().cuda(), target.long().cuda()
                 #  print('target despues de long: ', target.cpu().numpy(), target.shape)
@@ -444,9 +473,9 @@ def main(args):
 
 if __name__ == '__main__':
     args = parse_args()
-    if not os.path.exists(args.data_dir) or not os.listdir(args.data_dir):
-        data_downloader(args.data_dir)
+    #if not os.path.exists(args.data_dir) or not os.listdir(args.data_dir):
+     #   data_downloader(args.data_dir)
     
-    #train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir = main(args)
+    train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir = main(args)
 
-    #plot_loss_and_iou(train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir)
+    plot_loss_and_iou(train_loss_history, eval_loss_history, iou_history, train_acc_history, eval_acc_history, eval_acc_avg_history, checkpoints_dir)
