@@ -8,7 +8,10 @@ def process_npy_files(area_dir):
         npy_path = os.path.join(area_dir, npy_file)
         
         # Carga el archivo .npy
-        data = np.load(npy_path)
+        try:
+            data = np.load(npy_path)
+        except:
+            print(f'Archivo {npy_file} no encontrado.')
         
         # Aquí puedes procesar los datos cargados
         print(f"Procesando archivo: {npy_path}")
@@ -35,7 +38,7 @@ def main(args):
     for item in os.listdir(args.data_dir):
         item_path = os.path.join(args.data_dir, item)
         
-        if os.path.isdir(item_path) and pattern.match(item):
+        if os.path.isdir(item_path): # and pattern.match(item):
             areas_list.append(item_path)
 
     random_area = random.choice(areas_list)
@@ -47,11 +50,12 @@ def main(args):
     print(random_room)
     full_dir = os.path.join(args.data_dir,random_area, random_room)
     print(full_dir)
+    #process_npy_files('/home/nicolas/repos/custom_pointnet2_pytorch/data/blender_areas/Area_1/amtc_1')
     process_npy_files(full_dir)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Data tester for datasets.')
-    parser.add_argument('--data-dir', type=str, default='/home/nicolas/repos/dust-filtering/data/s3dis',
+    parser.add_argument('--data_dir', type=str, default='/home/nicolas/repos/dust-filtering/data/s3dis',
                         help='Directory where the dataset is located.')
     args = parser.parse_args()
     main(args)
