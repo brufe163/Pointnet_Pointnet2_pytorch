@@ -113,7 +113,10 @@ def toSegPointCloud(depth_dir,mask_dir, args):
     x = (x - original_width / 2) / fx
     y = (y - original_height / 2) / fy
     z = np.array(depth) / 10.0
-    points = np.stack((np.multiply(x, z), np.multiply(y, z), z), axis=-1).reshape(-1, 3)
+    points_nf = np.stack((np.multiply(x, z), np.multiply(y, z), z), axis=-1).reshape(-1, 3)
+
+    points = points_nf[points_nf[:, 2] <= args.max_depth]
+    
 
     temp_mask = mask.copy() # Temporal para no sobreescribir en la misma máscara
     
@@ -121,26 +124,35 @@ def toSegPointCloud(depth_dir,mask_dir, args):
     mask[temp_mask == 0] = args.else_cls # Asignar la clase para el resto
 
     classes = mask.reshape(-1)
+    classes = classes[points_nf[:, 2] <= args.max_depth]
     #points_with_classes = np.hstack((points, classes[:, np.newaxis]))
 
 
     
     if not args.no_subsampling:
+        # Filtrar puntos con una profundidad menor o igual a max_depth
+        points = points[points[:, 2] <= args.max_depth]
+        classes = classes[points[:, 2] <= args.max_depth]
+        h_fov_rad = math.radians(args.camera_fov)
+        v_fov_rad = math.radians(args.camera_fov)
 
-        h_fov_rad = math.radians(camera_fov)
-        v_fov_rad = math.radians(camera_fov)
-        h_angle_step = h_fov_rad / lidar_horizontal_points
-        v_angle_step = v_fov_rad / lidar_vertical_channels
+        # Calcular la resolución angular
+        h_angle_step = h_fov_rad / args.lidar_horizontal_points
+        v_angle_step = v_fov_rad / args.lidar_vertical_channels
 
+        # Calcular las coordenadas esféricas para cada punto
         r = np.linalg.norm(points, axis=1)
-        azimuth = np.arctan2(points[:, 0], points[:, 2])
-        elevation = np.arcsin(points[:, 1] / r)
+        azimuth = np.arctan2(points[:, 0], points[:, 2])  # Ángulo horizontal
+        elevation = np.arcsin(points[:, 1] / r)           # Ángulo vertical
 
+        # Crear los bins angulares
         h_bins = np.round(azimuth / h_angle_step).astype(int)
         v_bins = np.round(elevation / v_angle_step).astype(int)
 
+        # Combinar los bins para crear una cuadrícula
         unique_bins = np.unique(np.stack((h_bins, v_bins), axis=1), axis=0)
 
+        # Seleccionar un punto por bin
         subsampled_points = []
         subsampled_classes = []
         for ub in unique_bins:
@@ -149,6 +161,7 @@ def toSegPointCloud(depth_dir,mask_dir, args):
                 subsampled_points.append(points[indices[0]])
                 subsampled_classes.append(classes[indices[0]])
 
+        # Convertir a array numpy
         points = np.array(subsampled_points, dtype=np.float32)
         classes = np.array(subsampled_classes, dtype=np.int16)
     
@@ -156,9 +169,9 @@ def toSegPointCloud(depth_dir,mask_dir, args):
     if args.out_format == 'npy':    # Necesitamos normalizar y "crear datos" de RGB
         if args.train_test:
             if num <=120:
-                out_dir = f'{args.outdir}/Area_7/amtc_{num}/'
+                out_dir = f'{args.outdir}/Area_1/amtc_{num}/'
             else:
-                out_dir = f'{args.outdir}/Area_8/amtc_{num}/'
+                out_dir = f'{args.outdir}/Area_2/amtc_{num}/'
         else:
             out_dir = f'{args.outdir}/amtc_{num}/'
         if args.normalize:
@@ -203,10 +216,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate depth maps and point clouds from images.')
     parser.add_argument('--max-depth', default=20, type=float,
                         help='Maximum depth value for the depth map.')
-    parser.add_argument('--depth-path', type=str, default = '/home/nicolas/repos/dust-filtering/data/depth_seg_2/Depth/',
-                        help='Path to the input image or directory containing images.')
-    parser.add_argument('--mask-path', type=str, default = '/home/nicolas/repos/dust-filtering/data/depth_seg_2/Seg/',
-                        help='Path to the mask image or directory containing masks.')           
+    #parser.add_argument('--depth-path', type=str, default = '/home/nicolas/repos/dust-filtering/data/depth_seg_2/Depth/',
+    #                    help='Path to the input image or directory containing images.')
+    #parser.add_argument('--mask-path', type=str, default = '/home/nicolas/repos/dust-filtering/data/depth_seg_2/Seg/',
+    #                    help='Path to the mask image or directory containing masks.')
+    parser.add_argument('--data_path', type= str, default='/home/nicolas/repos/dust-filtering/data/depth_seg_2/',
+                        help='Directory where the Seg and Depth folders are located.')
     parser.add_argument('--outdir', type=str, default='/home/nicolas/repos/dust-filtering/data/s3dis/Area_7',
                         help='Directory to save the output point clouds.')
     parser.add_argument('--out-format', type=str, choices = ['ply', 'npy', 'pcd'],default='npy',
@@ -235,8 +250,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    depth_files = sorted(glob.glob(os.path.join(args.depth_path, '*.png')), key=natural_sort_key)
-    mask_files = sorted(glob.glob(os.path.join(args.mask_path, '*.png')), key=natural_sort_key)
+    depth_files = sorted(glob.glob(os.path.join(args.data_path,'Depth', '*.png')), key=natural_sort_key)
+    mask_files = sorted(glob.glob(os.path.join(args.data_path,'Seg', '*.png')), key=natural_sort_key)
 
     os.makedirs(args.outdir, exist_ok=True)
     file_path = os.path.join(args.outdir, "info.txt")
