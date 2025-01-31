@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 class AMTCDataset:
     def __init__(self, data_root='trainval_fullarea', num_point=4096, voxel_size=0.1,
                  feats=['coord', 'color', 'intensity'], num_classes=2, labels_available=True,
-                 split_ratios=(0.6, 0.2, 0.2)):
+                 split_ratios=(0.6, 0.2, 0.2), random_seed=None):  # Añadimos random_seed
         super().__init__()
 
         self.feats = feats
@@ -17,22 +17,16 @@ class AMTCDataset:
         self.split_ratios = split_ratios
         assert sum(split_ratios) == 1.0, "Los porcentajes de división deben sumar 1"
 
+        # Si se proporciona una semilla, se establece para la reproducibilidad
+        if random_seed is not None:
+            np.random.seed(random_seed)
+
         # Cargamos las carpetas del AMTC como áreas
         areas = sorted(os.listdir(data_root))
         areas = [area for area in areas if 'Area_' in area]
 
-        self.room_coord_min = []
-        self.room_coord_max = []
-        self.room_names = []
-        labelweights = np.zeros(num_classes)
-
-        # Inicializamos listas para cada conjunto
-        self.train_points = []
-        self.train_labels = []
-        self.val_points = []
-        self.val_labels = []
-        self.test_points = []
-        self.test_labels = []
+        # Lista para almacenar información de todas las escenas
+        all_rooms = []
 
         # Iteramos por cada área del dataset
         for area in tqdm(areas, total=len(areas)):
@@ -41,21 +35,61 @@ class AMTCDataset:
             room_list = [room for room in room_list if 'amtc_' in room]
             for room_name in room_list:
                 room_path = os.path.join(area_path, room_name)
+                all_rooms.append((area, room_name, room_path))
+
+        # Barajamos las escenas
+        np.random.shuffle(all_rooms)
+
+        # Calculamos los índices de corte para los splits
+        total_rooms = len(all_rooms)
+        train_end = int(self.split_ratios[0] * total_rooms)
+        val_end = train_end + int(self.split_ratios[1] * total_rooms)
+
+        # Dividimos las escenas
+        train_rooms = all_rooms[:train_end]
+        val_rooms = all_rooms[train_end:val_end]
+        test_rooms = all_rooms[val_end:]
+
+        # Inicializamos listas para cada conjunto
+        self.train_points = []
+        self.train_labels = []
+        self.train_coord_min = []
+        self.train_coord_max = []
+        self.train_room_names = []
+        self.train_area_names = []
+
+        self.val_points = []
+        self.val_labels = []
+        self.val_coord_min = []
+        self.val_coord_max = []
+        self.val_room_names = []
+        self.val_area_names = []
+
+        self.test_points = []
+        self.test_labels = []
+        self.test_coord_min = []
+        self.test_coord_max = []
+        self.test_room_names = []
+        self.test_area_names = []
+
+        # Acumulador de labelweights
+        labelweights = np.zeros(num_classes)
+
+        # Función para procesar las escenas
+        def process_rooms(room_list, points_list, labels_list, coord_min_list, coord_max_list, room_names_list, area_names_list):
+            for area_name, room_name, room_path in room_list:
                 if self.labels_available:
-                    labels = np.load(os.path.join(room_path, 'segment.npy'))  # Etiquetas (N,)
-                    labels = labels.reshape(-1)
+                    labels = np.load(os.path.join(room_path, 'segment.npy')).reshape(-1)
                 else:
-                    labels = None  # No cargamos etiquetas
-                room_idx = len(self.room_names)
-                self.room_names.append(room_name)
+                    labels = None
 
                 points, coord = self.load_features(self.feats, room_path)
 
                 # Calculamos los valores mínimos y máximos para normalización
                 if coord is not None:
                     coord_min, coord_max = np.amin(coord, axis=0), np.amax(coord, axis=0)
-                    self.room_coord_min.append(coord_min)
-                    self.room_coord_max.append(coord_max)
+                else:
+                    coord_min, coord_max = np.zeros(3), np.ones(3)
 
                 # Verificamos si es necesario voxelizar
                 if points.shape[0] > num_point:
@@ -65,40 +99,28 @@ class AMTCDataset:
                         points = self.voxelize(points)
                         labels = None
 
-                # División de datos en train, val y test
-                total_points = points.shape[0]
-                indices = np.arange(total_points)
-                np.random.shuffle(indices)
-
-                train_end = int(self.split_ratios[0] * total_points)
-                val_end = train_end + int(self.split_ratios[1] * total_points)
-
-                train_indices = indices[:train_end]
-                val_indices = indices[train_end:val_end]
-                test_indices = indices[val_end:]
-
-                # Almacenamos los datos por escena
-                self.train_points.append(points[train_indices])
+                points_list.append(points)
+                coord_min_list.append(coord_min)
+                coord_max_list.append(coord_max)
+                room_names_list.append(room_name)  # Almacenamos el nombre de la habitación
+                area_names_list.append(area_name)  # Almacenamos el nombre del área
                 if self.labels_available:
-                    self.train_labels.append(labels[train_indices])
+                    labels_list.append(labels)
 
-                self.val_points.append(points[val_indices])
-                if self.labels_available:
-                    self.val_labels.append(labels[val_indices])
-
-                self.test_points.append(points[test_indices])
-                if self.labels_available:
-                    self.test_labels.append(labels[test_indices])
-
-                if self.labels_available:
                     # Acumulamos los pesos de las etiquetas
                     tmp, _ = np.histogram(labels, range(num_classes + 1))
+                    nonlocal labelweights
                     labelweights += tmp
+
+        # Procesamos los conjuntos
+        process_rooms(train_rooms, self.train_points, self.train_labels, self.train_coord_min, self.train_coord_max, self.train_room_names, self.train_area_names)
+        process_rooms(val_rooms, self.val_points, self.val_labels, self.val_coord_min, self.val_coord_max, self.val_room_names, self.val_area_names)
+        process_rooms(test_rooms, self.test_points, self.test_labels, self.test_coord_min, self.test_coord_max, self.test_room_names, self.test_area_names)
 
         if self.labels_available:
             labelweights = labelweights.astype(np.float32)
             labelweights = labelweights / np.sum(labelweights)
-            self.labelweights = [10, 1]  # np.power(np.amax(labelweights) / labelweights, 1 / 3.0)
+            self.labelweights = [10, 1]  # Puedes ajustar estos valores según tus necesidades
             print('Labelweights: ', self.labelweights)
         else:
             self.labelweights = None
@@ -110,24 +132,30 @@ class AMTCDataset:
         self.train = self.AMTCDatasetSplit(
             self.train_points,
             self.train_labels,
-            self.room_coord_min,
-            self.room_coord_max,
+            self.train_coord_min,
+            self.train_coord_max,
+            self.train_room_names,
+            self.train_area_names,
             self.num_feats,
             self.labels_available
         )
         self.val = self.AMTCDatasetSplit(
             self.val_points,
             self.val_labels,
-            self.room_coord_min,
-            self.room_coord_max,
+            self.val_coord_min,
+            self.val_coord_max,
+            self.val_room_names,
+            self.val_area_names,
             self.num_feats,
             self.labels_available
         )
         self.test = self.AMTCDatasetSplit(
             self.test_points,
             self.test_labels,
-            self.room_coord_min,
-            self.room_coord_max,
+            self.test_coord_min,
+            self.test_coord_max,
+            self.test_room_names,
+            self.test_area_names,
             self.num_feats,
             self.labels_available
         )
@@ -144,10 +172,12 @@ class AMTCDataset:
         voxelized_points = np.asarray(pcd_down.points)
 
         # Mapeamos las características adicionales (color, intensidad) a los puntos voxelizados
-        voxelized_features = self.map_voxel_features(points[:, 3:], points[:, :3], voxelized_points)
-
-        # Concatenamos las coordenadas voxelizadas con las características adicionales
-        voxelized_features = np.concatenate([voxelized_points, voxelized_features], axis=1)
+        if points.shape[1] > 3:
+            voxelized_features = self.map_voxel_features(points[:, 3:], points[:, :3], voxelized_points)
+            # Concatenamos las coordenadas voxelizadas con las características adicionales
+            voxelized_features = np.concatenate([voxelized_points, voxelized_features], axis=1)
+        else:
+            voxelized_features = voxelized_points
 
         if self.labels_available and labels is not None:
             # Mapeamos las etiquetas de los puntos originales a los puntos voxelizados
@@ -175,7 +205,8 @@ class AMTCDataset:
             'coord': 'coord.npy',       # Coordenadas (N, 3)
             'color': 'color.npy',       # Colores (N, 3)
             'normal': 'normal.npy',     # Normales (N, 3)
-            'intensity': 'intensity.npy'  # Intensidad (N, 1)
+            'intensity': 'intensity.npy',  # Intensidad (N, 1)
+            'flow': 'flow.npy' # Scene Flow (N, 3)
         }
         # Puedes agregar más características si están disponibles
 
@@ -197,11 +228,13 @@ class AMTCDataset:
         return points, coord
 
     class AMTCDatasetSplit(Dataset):
-        def __init__(self, points_list, labels_list, room_coord_min, room_coord_max, num_feats, labels_available):
-            self.points_list = points_list  # Lista de arrays de puntos por escena
-            self.labels_list = labels_list  # Lista de arrays de etiquetas por escena
-            self.room_coord_min = room_coord_min
-            self.room_coord_max = room_coord_max
+        def __init__(self, points_list, labels_list, coord_min_list, coord_max_list, room_names_list, area_names_list, num_feats, labels_available):
+            self.points_list = points_list  # Lista de pointclouds
+            self.labels_list = labels_list  # Lista de etiquetas
+            self.coord_min_list = coord_min_list
+            self.coord_max_list = coord_max_list
+            self.room_names_list = room_names_list  # Lista de nombres de habitaciones
+            self.area_names_list = area_names_list  # Lista de nombres de áreas
             self.num_feats = num_feats
             self.labels_available = labels_available
 
@@ -210,12 +243,15 @@ class AMTCDataset:
 
         def __getitem__(self, idx):
             points = self.points_list[idx]
-            room_idx = idx
-            coord_min = self.room_coord_min[room_idx]
-            coord_max = self.room_coord_max[room_idx]
+            coord_min = self.coord_min_list[idx]
+            coord_max = self.coord_max_list[idx]
+            room_name = self.room_names_list[idx]
+            area_name = self.area_names_list[idx]
 
             # Normalización de las coordenadas
             current_points = np.zeros((points.shape[0], self.num_feats + 3))
+            # Evitar divisiones por cero en caso de que coord_max sea cero
+            coord_max = np.where(coord_max == 0, 1e-6, coord_max)
             current_points[:, -3] = points[:, 0] / coord_max[0]  # Normalización de X
             current_points[:, -2] = points[:, 1] / coord_max[1]  # Normalización de Y
             current_points[:, -1] = points[:, 2] / coord_max[2]  # Normalización de Z
@@ -225,10 +261,9 @@ class AMTCDataset:
 
             if self.labels_available:
                 labels = self.labels_list[idx]
-                return current_points, labels
+                return current_points, labels, room_name, area_name
             else:
-                return current_points
-
+                return current_points, room_name, area_name
 
 import matplotlib.pyplot as plt
 
@@ -237,7 +272,7 @@ def vis_result(coord, classes):
     colors = np.zeros((len(classes), 3))
     
     # Calcular el centro de la pointcloud
-    center = [-0.02121615, -0.17857136,  0.53300786]
+    center = np.mean(coord, axis=0)
     
     # Calcular la distancia de cada punto al centro de la pointcloud
     distances = np.linalg.norm(coord - center, axis=1)
@@ -268,13 +303,12 @@ def vis_result(coord, classes):
     # Obtener el view_control para establecer los parámetros de la cámara
     view_ctl = vis.get_view_control()
 
-    # Parámetros de la visualización
-    front = [-0.7898722749711754, -0.55708060133549198, 0.25644296217199342]
-    lookat = [0.18329496841419204, -0.35543351529051487, 0.44828765533995957]
-    up = [0.18403812731142727, 0.183566510259043, 0.96562586129774952]
-    zoom = 0.1
+    # Establecer los parámetros de la cámara (ajusta estos valores si es necesario)
+    front = [-0.5, -0.5, 0.5]
+    lookat = [0.0, 0.0, 0.0]
+    up = [0.0, 0.0, 1.0]
+    zoom = 0.5
 
-    # Establecer los parámetros de la cámara
     view_ctl.set_front(front)
     view_ctl.set_lookat(lookat)
     view_ctl.set_up(up)
@@ -291,7 +325,7 @@ if __name__ == '__main__':
     curr_dir = os.getcwd()
     parent_dir = os.path.abspath(os.path.join(curr_dir, os.pardir))
 
-    data_root = os.path.join(parent_dir, 'data', 'blender_outside_ns_md2')
+    data_root = os.path.join(parent_dir, 'data', 'blender_areas')  # Ajusta esta ruta a tu dataset
     num_point, voxel_size = 5000, 0.1
 
     # Instanciamos el dataset
@@ -305,11 +339,16 @@ if __name__ == '__main__':
         split_ratios=(0.6, 0.2, 0.2)
     )
 
-    # Obtenemos un ejemplo del conjunto de entrenamiento
-    data, labels = dataset.train[0]
-    room_name = dataset.room_names[0]
+    print("The number of training data is:", len(dataset.train))
+    print("The number of validation data is:", len(dataset.val))
+    print("The number of test data is:", len(dataset.test))
 
-    print(f'Viendo escena {room_name}...')
-    print('data shape: ', np.shape(data))
-    print('labels: ', np.unique(labels, return_counts=True))
+    # Obtenemos un ejemplo del conjunto de entrenamiento
+    data, labels, room_name, area_name = dataset.train[0]
+
+    print(f'Visualizando la habitación: {room_name} del área: {area_name}')
+    print('Data shape:', np.shape(data))
+    print('Labels:', np.unique(labels, return_counts=True))
+    
+    # Visualizamos la pointcloud
     vis_result(data[:, :3], labels)

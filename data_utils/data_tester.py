@@ -38,11 +38,11 @@ def main(args):
     for item in os.listdir(args.data_dir):
         item_path = os.path.join(args.data_dir, item)
         
-        if os.path.isdir(item_path): # and pattern.match(item):
+        if os.path.isdir(item_path) and pattern.match(item):
             areas_list.append(item_path)
 
     random_area = random.choice(areas_list)
-    #random_area = 'Area_8'
+    random_area = 'Area_31'
     print(random_area)
     rooms_list = os.listdir(os.path.join(args.data_dir,random_area))
     random_room = random.choice(rooms_list)

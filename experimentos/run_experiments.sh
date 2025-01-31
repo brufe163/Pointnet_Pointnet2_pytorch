@@ -1,0 +1,6 @@
+#!/bin/bash
+
+python3 train_amtc_v3.py --feat_list coord intensity --data_dir /home/nicolas/repos/custom_pointnet2_pytorch/data/experimentos/interior1/ --notes "Entrenamiento (v3) con modelo 1 en interior1, entrenando con interior1." --voxel_size 0.1 --epoch 100 --val_test_set 34 35 --learning_rate 0.01
+python3 train_amtc_v3.py --feat_list coord intensity --data_dir /home/nicolas/repos/custom_pointnet2_pytorch/data/experimentos/interior2/ --notes "Entrenamiento (v3) con modelo 1 en interior2, entrenando con interior2." --voxel_size 0.1 --epoch 100 --val_test_set 63 64 --learning_rate 0.01
+python3 train_amtc_v3.py --feat_list coord intensity diff_vectors --data_dir /home/nicolas/repos/custom_pointnet2_pytorch/data/experimentos/interior1/ --notes "Entrenamiento (v3) con modelo 2 en interior1, entrenando con interior1." --voxel_size 0.1 --epoch 100 --val_test_set 34 35 --learning_rate 0.01
+python3 train_amtc_v3.py --feat_list coord intensity diff_vectors --data_dir /home/nicolas/repos/custom_pointnet2_pytorch/data/experimentos/interior2/ --notes "Entrenamiento (v3) con modelo 2 en interior2, entrenando con interior2." --voxel_size 0.1 --epoch 100 --val_test_set 63 64 --learning_rate 0.01

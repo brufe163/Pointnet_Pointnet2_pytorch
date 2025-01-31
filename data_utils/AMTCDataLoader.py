@@ -6,39 +6,63 @@ from torch.utils.data import Dataset
 from scipy.spatial import cKDTree
 import open3d as o3d
 
+from data_utils.AMTCTransforms import *
 
 class AMTCDataset(Dataset):
-    def __init__(self, split='train', data_root='trainval_fullarea', num_point=4096, voxel_size=0.1,test_area=5, feats = ['coord', 'color', 'intensity'], num_classes = 2):
+    def __init__(self, areas, data_root='trainval_fullarea', num_point=4096, voxel_size=0.1, feats=['coord', 'color', 'intensity'], num_classes=2, labels_available=True, transform=None, hyperset=False):
         super().__init__()
 
         self.feats = feats
         self.voxel_size = voxel_size
+        self.labels_available = labels_available
+        self.transform = transform
+        self.feature_positions = {}
 
-        # Cargamos las carpetas del amtc como áreas
-        areas = sorted(os.listdir(data_root))
-        areas = [area for area in areas if 'Area_' in area]
+        # Asegurarnos de que se pasen las áreas necesarias
+        assert areas, "Debes proporcionar al menos una lista de áreas para este conjunto."
+        
+        if hyperset:
+            selected_areas = []
+            for area_path in areas:
+                # area_path es algo como "experimento1/Area_1"
+                full_path = os.path.join(data_root, area_path)  # data_root/experimento1/Area_1
+                if os.path.isdir(full_path):  # check if it is a directory
+                    selected_areas.append(area_path)
 
-        assert split in ['train', 'test']
+            assert selected_areas, "No se encontraron áreas válidas con las rutas especificadas."
 
-        if split == 'train':
-            areas_split = [area for area in areas if not 'Area_{}'.format(test_area) in area]
+            self.areas = selected_areas
         else:
-            areas_split = [area for area in areas if 'Area_{}'.format(test_area) in area]
 
-        self.room_points, self.room_labels = [], []
+
+            # Cargamos las carpetas del dataset
+            all_areas = sorted([area for area in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, area)) and 'Area_' in area])
+            
+            # Convertimos los números de áreas en nombres
+            areas = [f"Area_{i}" for i in areas]
+            
+            # Filtramos las áreas disponibles
+            self.areas = [area for area in all_areas if area in areas]
+            assert self.areas, "No se encontraron áreas válidas con los números especificados."
+
+        print("Áreas seleccionadas:", self.areas)
+
+        self.room_points = []
+        self.room_labels = [] if self.labels_available else None
         self.room_coord_min, self.room_coord_max = [], []
         self.room_names = []
         labelweights = np.zeros(num_classes)
 
-        # Iteramos por cada área del dataset
-        for area in tqdm(areas_split, total=len(areas_split)):
+        # Procesamos las áreas seleccionadas
+        for area in tqdm(self.areas, total=len(self.areas)):
             area_path = os.path.join(data_root, area)
-            room_list = os.listdir(area_path)
-            room_list = [room for room in room_list if 'amtc_' in room]
+            room_list = [room for room in os.listdir(area_path) if 'amtc_' in room and os.path.isdir(os.path.join(area_path, room))]
             for room_name in room_list:
                 room_path = os.path.join(area_path, room_name)
-                labels = np.load(os.path.join(room_path, 'segment.npy'))  # Etiquetas (N,)
-                labels = labels.reshape(-1)
+                if self.labels_available:
+                    labels = np.load(os.path.join(room_path, 'segment.npy')).reshape(-1)
+                else:
+                    labels = None
                 self.room_names.append(room_name)
 
                 points, coord = self.load_features(self.feats, room_path)
@@ -51,32 +75,52 @@ class AMTCDataset(Dataset):
 
                 # Verificamos si es necesario voxelizar
                 if points.shape[0] > num_point:
-                    voxelized_points, voxelized_labels = self.voxelize(points, labels)
+                    if self.labels_available:
+                        voxelized_points, voxelized_labels = self.voxelize(points, labels)
+                    else:
+                        voxelized_points = self.voxelize(points)
+                        voxelized_labels = None
                     self.room_points.append(voxelized_points)
-                    self.room_labels.append(voxelized_labels)
+                    if self.labels_available:
+                        self.room_labels.append(voxelized_labels)
                 else:
                     # Si no se requiere voxelización, almacenamos los puntos originales
                     self.room_points.append(points)
-                    self.room_labels.append(labels)
+                    if self.labels_available:
+                        self.room_labels.append(labels)
 
-                # Acumulamos los pesos de las etiquetas
-                tmp, _ = np.histogram(labels, range(num_classes + 1))
-                labelweights += tmp
+                if self.labels_available:
+                    # Acumulamos los pesos de las etiquetas
+                    tmp, _ = np.histogram(labels, range(num_classes + 1))
+                    labelweights += tmp
 
+        if self.labels_available:
+            labelweights = labelweights.astype(np.float32)
+            labelweights = labelweights / np.sum(labelweights)
+            self.labelweights = np.amax(labelweights) / labelweights
+            self.labelweights = self.labelweights / np.sum(self.labelweights)
+            print('Labelweights: ', self.labelweights)
+        else:
+            self.labelweights = None
 
-        labelweights = labelweights.astype(np.float32)
-        labelweights = labelweights / np.sum(labelweights)
-        self.labelweights = [10, 1] #np.power(np.amax(labelweights) / labelweights, 1 / 3.0)
-        print('Labelweights: ', self.labelweights)
-        self.num_feats = self.room_points[0].shape[1] # coord = 3; color = 3; intensity = 1
+        self.num_feats = self.room_points[0].shape[1]  # coord = 3; color = 3; intensity = 1
         print('Number of feats in dataset: ', self.num_feats)
 
         if num_point is None or num_point < points.shape[0]:
             self.num_point = points.shape[0]
-        else:        
+        else:
             self.num_point = num_point
 
-    def voxelize(self, points, labels):
+    def _calculate_feature_positions(self):
+        feature_map = {'coord': 3, 'color': 3, 'normal': 3, 'intensity': 1, 'flow': 3, 'diff':1, 'diff_vectors':3, 'interp':1}  # Define dimensiones
+        positions = {}
+        pos = 0
+        for feat in self.feats:
+            positions[feat] = (pos, pos + feature_map[feat])
+            pos += feature_map[feat]
+        return positions
+
+    def voxelize(self, points, labels=None):
         # Aplicamos la voxelización con el tamaño de voxel definido
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points[:, :3])  # Solo usamos las coordenadas
@@ -87,16 +131,18 @@ class AMTCDataset(Dataset):
         # Obtenemos las coordenadas voxelizadas
         voxelized_points = np.asarray(pcd_down.points)
 
-        # Mapeamos las etiquetas de los puntos originales a los puntos voxelizados
-        voxelized_labels = self.map_voxel_labels(points[:, :3], voxelized_points, labels)
-
         # Mapeamos las características adicionales (color, intensidad) a los puntos voxelizados
         voxelized_features = self.map_voxel_features(points[:, 3:], points[:, :3], voxelized_points)
 
         # Concatenamos las coordenadas voxelizadas con las características adicionales
         voxelized_features = np.concatenate([voxelized_points, voxelized_features], axis=1)
 
-        return voxelized_features, voxelized_labels
+        if self.labels_available and labels is not None:
+            # Mapeamos las etiquetas de los puntos originales a los puntos voxelizados
+            voxelized_labels = self.map_voxel_labels(points[:, :3], voxelized_points, labels)
+            return voxelized_features, voxelized_labels
+        else:
+            return voxelized_features
 
     def map_voxel_labels(self, original_points, voxelized_points, labels):
         # Esta función asigna etiquetas a los puntos voxelizados
@@ -106,42 +152,75 @@ class AMTCDataset(Dataset):
         return voxelized_labels
 
     def map_voxel_features(self, original_features, original_points, voxelized_points):
-        # Esta función asigna características adicionales (color, intensidad) a los puntos voxelizados
+        # Creamos un árbol KD para buscar los vecinos más cercanos
         tree = cKDTree(original_points)
         _, idx = tree.query(voxelized_points)
-        voxelized_features = original_features[idx]
+        
+        # Lista para almacenar las características mapeadas
+        mapped_features = []
+
+        # Iteramos por cada característica usando `feature_positions`
+        for feat, (start, end) in self.feature_positions.items():
+            # Extraemos la porción correspondiente de `original_features`
+            feature_slice = original_features[:, start:end]
+            # Mapeamos las características utilizando el índice del KDTree
+            mapped_feature = feature_slice[idx]
+            mapped_features.append(mapped_feature)
+        
+        # Concatenamos todas las características mapeadas
+        voxelized_features = np.concatenate(mapped_features, axis=1)
         return voxelized_features
+
 
     def load_features(self, feats, room_path):
         feature_map = {
             'coord': 'coord.npy',       # Coordenadas (N, 3)
             'color': 'color.npy',       # Colores (N, 3)
-            'normal': 'normal.npy',     # Normales (N, 3) (Aquí solo como ejemplo, puedes agregar la carga si tienes estos datos)
-            'intensity': 'intensity.npy'  # Intensidad (N, 1)
-        }   # TODO: agregar doble rebote (considerar si son las mismas dimensiones que en el primero)
-        
+            'normal': 'normal.npy',     # Normales (N, 3)
+            'intensity': 'intensity.npy',  # Intensidad (N, 1)
+            'flow': 'flow.npy',          # Scene flow (N, 3)
+            'diff': 'diff.npy',          # Diferencia  (N, 1)
+            'diff_vectors': 'diff_vectors.npy', # Diferencia  (N, 3)
+            'interp': 'interp.npy'
+        }
+
         loaded_features = []
         coord = None
+        position = 0  # Posición actual en la concatenación de características
+
         for feat in feats:
             if feat in feature_map:
                 file_path = os.path.join(room_path, feature_map[feat])
                 data = np.load(file_path)
-                if feat == 'intensity': 
-                    loaded_features.append(data.reshape(-1, 1))
-                else: 
-                    loaded_features.append(data)
+                
+                # Ajuste de dimensión si es necesario
+                if feat == 'intensity' or feat == 'diff':
+                    data = data.reshape(-1, 1)
+                
+                # Agregar data a loaded_features
+                loaded_features.append(data)
+                
+                # Guardar la posición en el diccionario
+                self.feature_positions[feat] = (position, position + data.shape[1])
+                
+                # Actualizar posición actual
+                position += data.shape[1]
+
+                # Guardar coordenadas si es `coord`
                 if feat == 'coord':
                     coord = data
-    
-        # Concatenar todas las características cargadas a lo largo de la segunda dimensión (axis=1)
+
+        # Concatenar todas las características cargadas
         points = np.concatenate(loaded_features, axis=1)
         return points, coord
 
-
-    def __getitem__(self, idx,return_index = False):
+    def __getitem__(self, idx, return_index=False):
         # Selecciona la pointcloud completa del índice proporcionado
         points = self.room_points[idx]
-        labels = self.room_labels[idx]
+        if self.labels_available:
+            labels = self.room_labels[idx]
+        else:
+            labels = None
 
         # Recuperamos los mínimos y máximos de las coordenadas para la normalización
         room_idx = idx
@@ -159,143 +238,26 @@ class AMTCDataset(Dataset):
         # Copiamos las características originales (como color, intensidad, etc.) en las primeras columnas
         current_points[:, 0:self.num_feats] = points
 
-        # Devuelve todos los puntos normalizados y sus etiquetas
-        if return_index:
-            return current_points, labels, self.room_names[room_idx]
-        else:
-            return current_points, labels
+        # Aplicamos transformaciones
+        if self.transform is not None:
+            current_points, labels = self.transform(current_points, labels, self.feature_positions)
 
+        if return_index:
+            if self.labels_available:
+                return current_points, labels, self.room_names[room_idx]
+            else:
+                return current_points, None, self.room_names[room_idx]
+        else:
+            if self.labels_available:
+                return current_points, labels
+            else:
+                return current_points
 
     def __len__(self):
         return len(self.room_points)
 
-class AMTCRealDataset(Dataset):
-    def __init__(self, split='train', data_root='trainval_fullarea', num_point=4096, test_area=1, feats=['coord', 'intensity'], angle = None):
-        super().__init__()
-        self.feats = feats
-        self.angle = angle
 
-        # Cargamos las carpetas del amtc como áreas
-        areas = sorted(os.listdir(data_root))
-        areas = [area for area in areas if 'Area_' in area]
 
-        assert split in ['train', 'test']
-
-        if split == 'train':
-            areas_split = [area for area in areas if not 'Area_{}'.format(test_area) in area]
-        else:
-            areas_split = [area for area in areas if 'Area_{}'.format(test_area) in area]
-
-        self.room_points = []
-        self.room_coord_min, self.room_coord_max = [], []
-        num_point_all = []
-        self.room_names = []
-
-        # Iteramos por cada área del dataset
-        for area in tqdm(areas_split, total=len(areas_split)):
-            area_path = os.path.join(data_root, area)
-            room_list = os.listdir(area_path)
-            room_list = [room for room in room_list if 'amtc_' in room]
-            for room_name in room_list:
-                room_path = os.path.join(area_path, room_name)
-                self.room_names.append(room_name)
-
-                points, coord = self.load_features(self.feats, room_path)  # Cargamos las características
-
-                if coord is not None:
-                    coord_min, coord_max = np.amin(coord, axis=0), np.amax(coord, axis=0)
-                    self.room_coord_min.append(coord_min)
-                    self.room_coord_max.append(coord_max)
-            
-                self.room_points.append(points)
-                num_point_all.append(points.shape[0])
-
-        self.num_feats = self.room_points[0].shape[1]  # coord = 3; color = 3; intensity = 1
-        print('Number of feats in dataset: ', self.num_feats)
-
-        if num_point is None:
-            self.num_point = points.shape[0]
-        else:        
-            self.num_point = num_point
-
-        sample_prob = num_point_all / np.sum(num_point_all)
-        num_iter = int(np.sum(num_point_all) / self.num_point)
-
-        room_idxs = []
-        for index in range(len(self.room_points)):
-            room_idxs.extend([index] * int(round(sample_prob[index] * num_iter)))
-
-        self.room_idxs = np.array(room_idxs)
-
-    def filter_points_within_angle(self, data):
-        half_angle = np.radians(self.angle/ 2) 
-        # data contiene puntos y características: x, y, z, i, ...
-        x = data[:, 0]  # Extrae todas las x
-        y = data[:, 1]  # Extrae todas las y
-        
-        # Calcula el ángulo en el plano XY para todos los puntos
-        theta = np.arctan2(y, x)
-        
-        # Filtra los puntos que están dentro del rango de ángulo
-        mask = (-half_angle <= theta) & (theta <= half_angle)
-        
-        # Aplica la máscara para seleccionar las filas filtradas
-        filtered_data = data[mask]
-        
-        return filtered_data
-
-    def load_features(self, feats, room_path):
-        feature_map = {
-            'coord_1': 'coord_1.npy',       # Coordenadas (N, 3)
-            'coord_2': 'coord_2.npy',       # Coordenadas (N, 3)
-            'coord_12': 'coord_12.npy',       # Coordenadas (2*N, 3)
-            'intensity_1': 'intensity_1.npy',  # Intensidad (N, 1)
-            'intensity_2': 'intensity_2.npy',  # Intensidad (N, 1)
-            'intensity_12': 'intensity_12.npy',  # Intensidad (2*N, 1)
-            'reflectivity_1': 'reflectivity_1.npy',  # Reflectividad (N, 1)
-            'reflectivity_2': 'reflectivity_2.npy',  # Reflectividad (N, 1)
-            'reflectivity_12': 'reflectivity_12.npy',  # Reflectividad (2*N, 1)
-        }
-        
-        loaded_features = []
-        coord = None
-        for feat in feats:
-            if feat in feature_map:
-                file_path = os.path.join(room_path, feature_map[feat])
-                data = np.load(file_path)
-                if 'intensity' in feat or 'reflectivity' in feat:
-                    loaded_features.append(data.reshape(-1, 1))
-                else: 
-                    loaded_features.append(data)
-                if 'coord' in feat:
-                    coord = data
-
-        points = np.concatenate(loaded_features, axis=1)
-        return points, coord
-
-    def __getitem__(self, idx, return_index=False):
-        room_idx = self.room_idxs[idx]
-        points = self.room_points[room_idx]  # N * num_feats
-
-        if self.angle is not None:
-            points = self.filter_points_within_angle(points)
-
-        current_points = np.zeros((points.shape[0], self.num_feats + 3))  # N * (num_feats + 3)
-
-        current_points[:, -3] = points[:, 0] / self.room_coord_max[room_idx][0]  # Normalización de X
-        current_points[:, -2] = points[:, 1] / self.room_coord_max[room_idx][1]  # Normalización de Y
-        current_points[:, -1] = points[:, 2] / self.room_coord_max[room_idx][2]  # Normalización de Z
-
-        current_points[:, 0:self.num_feats] = points
-        if return_index:
-            return current_points, self.room_names[room_idx]
-        else:
-            return current_points
-
-    def __len__(self):
-        return len(self.room_idxs)
-
-import numpy as np
 import matplotlib.pyplot as plt
 import open3d as o3d
 
@@ -354,12 +316,13 @@ if __name__ == '__main__':
     curr_dir = os.getcwd()
     parent_dir = os.path.abspath(os.path.join(curr_dir, os.pardir))
 
-    data_root = os.path.join(parent_dir, 'data', 'blender_outside_ns_md2')
-    num_point, test_area, voxel_size= 5000, 2, 0.1
+    data_root = os.path.join(parent_dir, 'data', 'processed_ouster_data/grabaciones_08_11')
+    num_point, voxel_size= 5000, 0.1
 
-    point_data = AMTCDataset(split='train', data_root=data_root, num_point=num_point, test_area=2, voxel_size = voxel_size, feats = ['coord', 'intensity'], num_classes = 2)
+    point_data = AMTCDataset(split='train', data_root=data_root, num_point=num_point, val_test_area=[51, 61], voxel_size = voxel_size, feats = ['coord', 'intensity', 'diff'], num_classes = 2)
     data, labels, r_idx = point_data.__getitem__(0, return_index = True)
     print(f'Viendo escena {r_idx}...')
     print('data shape: ', np.shape(data))
     print('labels: ', np.unique(labels, return_counts=True))
     vis_result(data[:,:3],labels)   # real
+

@@ -222,7 +222,7 @@ if __name__ == "__main__":
     #                    help='Path to the mask image or directory containing masks.')
     parser.add_argument('--data_path', type= str, default='/home/nicolas/repos/dust-filtering/data/depth_seg_2/',
                         help='Directory where the Seg and Depth folders are located.')
-    parser.add_argument('--outdir', type=str, default='/home/nicolas/repos/dust-filtering/data/s3dis/Area_7',
+    parser.add_argument('--outdir', type=str, default='/home/nicolas/repos/custom_pointnet2_pytorch/data/blender_x,
                         help='Directory to save the output point clouds.')
     parser.add_argument('--out-format', type=str, choices = ['ply', 'npy', 'pcd'],default='npy',
                         help='Output format for points and labels.')
@@ -236,9 +236,9 @@ if __name__ == "__main__":
                         help='Number of vertical channels.')
     parser.add_argument('--camera-fov', default=90, type=float,
                         help='Field of view of the camera in degrees (assumed square FOV).')
-    parser.add_argument('--dust-cls', type = int, default = 12,
+    parser.add_argument('--dust-cls', type = int, default = 0,
                         help='Class value asigned to dust.')
-    parser.add_argument('--else-cls', type = int, default = 13 ,
+    parser.add_argument('--else-cls', type = int, default = 1 ,
                         help='Class value asigned to anything else on the dataset.')
     parser.add_argument('--no-subsampling', action='store_true', help='Deactivate pointcloud subsampling.')
     parser.add_argument('--normalize', action='store_true', help='Return normalized coords.')
