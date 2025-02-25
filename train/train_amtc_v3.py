@@ -35,6 +35,8 @@ seg_label_to_cat = {}
 for i, cat in enumerate(seg_classes.keys()):
     seg_label_to_cat[i] = cat
 
+beginning_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 logger = None  # Global logger variable
 
 def log_string(str):
@@ -178,7 +180,7 @@ def generate_metrics_and_plots(true_labels, pred_labels, dataset_name, results_d
 
         # Consolidar métricas en un diccionario
         metrics = {
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": beginning_time, # modificado para que sea el tiempo de inicio del entrenamiento
             "model": args.model,
             "dataset_name": dataset_name,
             "learning_rate": args.learning_rate,

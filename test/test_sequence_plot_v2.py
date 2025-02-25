@@ -12,11 +12,13 @@ from utils.test_sequence_utils import *
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import ast 
+import time
 
 # Evaluar modelo y generar gráficos
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-def model_eval_sequence(model, root='', feat=['coord', 'intensity'], data_set='test', num_classes=2, labels_available=True, timestamp_dir='', test_areas = [1,2,3]):
-    #DATASET = AMTCDataset(split=data_set, data_root=root, num_point=4096, voxel_size=0.1, val_test_area=sets , feats=feat, num_classes=num_classes, labels_available=labels_available)
+def model_eval_sequence(model, root='', feat=['coord', 'intensity'], 
+                        data_set='test', num_classes=2, labels_available=True, 
+                        timestamp_dir='', test_areas = [1,2,3], corrected = False):
     DATASET = AMTCDataset(
         areas=test_areas,
         data_root=root,
@@ -24,7 +26,8 @@ def model_eval_sequence(model, root='', feat=['coord', 'intensity'], data_set='t
         voxel_size=args.voxel_size,
         feats=feat,
         num_classes=num_classes,
-        labels_available=True
+        labels_available=True,
+        corrected = corrected
     )
     dataloader = DataLoader(DATASET, batch_size=1, shuffle=False, num_workers=4)
 
@@ -33,10 +36,15 @@ def model_eval_sequence(model, root='', feat=['coord', 'intensity'], data_set='t
     all_true_labels = np.array([], dtype=np.int32) if labels_available else None
 
     acc_list, iou_list = [], []
+    inference_times = []
 
     with torch.no_grad():
         for data, labels in tqdm(dataloader, desc="Evaluando frames"):
+            start_time = time.time()
             predicted_classes, dust_probabilities, total_acc, iou, labels_np = evaluate_frame(model, data, labels, labels_available)
+            end_time = time.time()
+
+            inference_times.append(end_time - start_time)
 
             # Concatenar resultados
             all_predicted_labels = np.concatenate((all_predicted_labels, predicted_classes))
@@ -46,6 +54,10 @@ def model_eval_sequence(model, root='', feat=['coord', 'intensity'], data_set='t
                 all_true_labels = np.concatenate((all_true_labels, labels_np))
                 acc_list.append(total_acc)
                 iou_list.append(iou)
+    
+    avg_inference_time = np.mean(inference_times)
+    print(f'Average inference time per frame: {avg_inference_time:.4f} seconds')
+
     print('labels:')
     print(np.unique(all_predicted_labels, return_counts = True ))
 
@@ -58,7 +70,6 @@ def model_eval_sequence(model, root='', feat=['coord', 'intensity'], data_set='t
     all_predicted_labels = all_predicted_labels[mask]
     all_probabilities = all_probabilities[mask]
     
-
     # Métricas finales, sólo si hay datos etiquetados
     if labels_available:
         metrics = calculate_metrics(all_true_labels, all_predicted_labels, all_probabilities)
@@ -74,11 +85,11 @@ def model_eval_sequence(model, root='', feat=['coord', 'intensity'], data_set='t
             metrics['roc_auc'],
             metrics['precision'],
             metrics['recall'],
+            avg_inference_time,
             timestamp_dir
         )
     else:
         print("No labels available, cannot compute accuracy or save results.")
-
 
 # Función principal
 def main(args):
@@ -98,7 +109,9 @@ def main(args):
     # Guardamos los argumentos del experimento
     save_info(args, timestamp_dir)
     # Evaluamos
-    model_eval_sequence(model, root=args.root_dir, feat=args.feat_list, num_classes=NUM_CLASSES, labels_available=labels_available, timestamp_dir=timestamp_dir, test_areas = test_areas)
+    model_eval_sequence(model, root=args.root_dir, feat=args.feat_list, num_classes=NUM_CLASSES, 
+                        labels_available=labels_available, timestamp_dir=timestamp_dir, 
+                        test_areas = test_areas, corrected = args.corrected)
     
 
 if __name__ == "__main__":
@@ -111,6 +124,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_areas', type=str, required=True,
                     help="Define las áreas para test en formato [1,2,3,4]")
     parser.add_argument('--unlabeled', action='store_true', help='Indicate if data is unlabeled')
+    parser.add_argument('--corrected', action='store_true', help='Indicate use of corrected data')
     parser.add_argument('--voxel_size', type=float, default=0.1, help='Tamaño del voxel [default: 0.1]')
     args = parser.parse_args()
     main(args)

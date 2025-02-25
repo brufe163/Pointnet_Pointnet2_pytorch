@@ -9,7 +9,9 @@ import open3d as o3d
 from data_utils.AMTCTransforms import *
 
 class AMTCDataset(Dataset):
-    def __init__(self, areas, data_root='trainval_fullarea', num_point=4096, voxel_size=0.1, feats=['coord', 'color', 'intensity'], num_classes=2, labels_available=True, transform=None, hyperset=False):
+    def __init__(self, areas, data_root='trainval_fullarea', num_point=4096, voxel_size=0.1, 
+                feats=['coord', 'color', 'intensity'], num_classes=2, labels_available=True, 
+                transform=None, hyperset=False, corrected = False):
         super().__init__()
 
         self.feats = feats
@@ -17,6 +19,7 @@ class AMTCDataset(Dataset):
         self.labels_available = labels_available
         self.transform = transform
         self.feature_positions = {}
+        self.corrected = corrected
 
         # Asegurarnos de que se pasen las áreas necesarias
         assert areas, "Debes proporcionar al menos una lista de áreas para este conjunto."
@@ -65,7 +68,7 @@ class AMTCDataset(Dataset):
                     labels = None
                 self.room_names.append(room_name)
 
-                points, coord = self.load_features(self.feats, room_path)
+                points, coord = self.load_features(self.feats, room_path, self.corrected)
 
                 # Calculamos los valores mínimos y máximos para normalización
                 if coord is not None:
@@ -172,8 +175,21 @@ class AMTCDataset(Dataset):
         return voxelized_features
 
 
-    def load_features(self, feats, room_path):
-        feature_map = {
+    def load_features(self, feats, room_path, corrected):
+
+        if corrected:
+            feature_map = {
+            'coord': 'coord_corrected.npy',       # Coordenadas (N, 3)
+            'color': 'color.npy',       # Colores (N, 3)
+            'normal': 'normal.npy',     # Normales (N, 3)
+            'intensity': 'intensity.npy',  # Intensidad (N, 1)
+            'flow': 'flow.npy',          # Scene flow (N, 3)
+            'diff': 'diff_corrected.npy',          # Diferencia corregida (N, 1)
+            'diff_vectors': 'diff_vectors_corrected.npy', # Diferencia corregida (N, 3)
+            'interp': 'interp_corrected.npy'
+            }
+        else:
+            feature_map = {
             'coord': 'coord.npy',       # Coordenadas (N, 3)
             'color': 'color.npy',       # Colores (N, 3)
             'normal': 'normal.npy',     # Normales (N, 3)
@@ -182,7 +198,7 @@ class AMTCDataset(Dataset):
             'diff': 'diff.npy',          # Diferencia  (N, 1)
             'diff_vectors': 'diff_vectors.npy', # Diferencia  (N, 3)
             'interp': 'interp.npy'
-        }
+            }
 
         loaded_features = []
         coord = None
