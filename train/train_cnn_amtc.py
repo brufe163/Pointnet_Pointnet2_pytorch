@@ -1,6 +1,6 @@
 import argparse
 import os
-from data_utils.AMTCDataLoader import *
+from data_utils.AMTCDataLoader import AMTCDatasetCNN
 import torch
 import datetime
 import logging
@@ -20,6 +20,7 @@ import seaborn as sns  # Importamos seaborn para mejorar las gráficas
 import ast
 import json
 import csv
+import torch.nn as nn
 """
 v3: usa grabaciones como conjuntos de validación y prueba. Además, añade más métricas.
 """
@@ -296,16 +297,15 @@ def plot_and_save_metrics(train_loss_history, val_loss_history, iou_history, tra
     print(f"Métricas guardadas en {metrics_file}")
 
 def collate_fn(batch):
-    max_points = max(points.shape[0] for points, _ in batch) # Encuentra la cantidad máxima de puntos en el batch
-    points_padded = [] # Lista para almacenar las pointclouds y las etiquetas
-    labels_padded = []
-
-    for points, labels in batch:
-        padded_points = np.pad(points, ((0, max_points - points.shape[0]), (0, 0)), mode='constant', constant_values=-1)
-        points_padded.append(padded_points)
-        padded_labels = np.pad(labels, (0, max_points - labels.shape[0]), mode='constant', constant_values=-1)
-        labels_padded.append(padded_labels)
-    return torch.from_numpy(np.array(points_padded)), torch.from_numpy(np.array(labels_padded)) # cambio porque estaba muy lento
+    max_voxels = max(feats.shape[0] for feats, _ in batch)
+    feats_padded, labels_padded = [], []
+    for feats, labels in batch:
+        pad_len = max_voxels - feats.shape[0]
+        feats_pad = torch.nn.functional.pad(feats, (0, 0, 0, pad_len), value=0)
+        labels_pad = torch.nn.functional.pad(labels, (0, pad_len), value=-1)
+        feats_padded.append(feats_pad)
+        labels_padded.append(labels_pad)
+    return torch.stack(feats_padded), torch.stack(labels_padded)
 
 
 
@@ -523,14 +523,14 @@ def main(args):
 
         train_areas, val_areas, test_areas = splits
 
-    TRANSFORMS = ComposeTransforms([
-        #IntensityJitter(jitter_range_dust=69, jitter_range_no_dust=408),
-        DustDispersion(dispersion_level=0.25),                                   
-        # FlowVariation(flow_variation_dust=0.005, flow_variation_no_dust=0.004),   
-        LocalScaling(scaling_range=(0.9, 1.1)),                                 
-        RandomRotation(angle_range=(0, np.pi)),
-        PositionJitter(coord_jitter=0.1, uniform=False)
-    ])
+    # TRANSFORMS = ComposeTransforms([
+    #     #IntensityJitter(jitter_range_dust=69, jitter_range_no_dust=408),
+    #     DustDispersion(dispersion_level=0.25),                                   
+    #     # FlowVariation(flow_variation_dust=0.005, flow_variation_no_dust=0.004),   
+    #     LocalScaling(scaling_range=(0.9, 1.1)),                                 
+    #     RandomRotation(angle_range=(0, np.pi)),
+    #     PositionJitter(coord_jitter=0.1, uniform=False)
+    # ])
 
 
     RANDOM_SEED = args.random_seed
@@ -563,83 +563,61 @@ def main(args):
     
     if args.hyperset:
         print("Train Set:")
-        TRAIN_DATASET = AMTCDataset(
+        TRAIN_DATASET = AMTCDatasetCNN(
             areas=train_areas,
             data_root=ROOT,
-            num_point=args.npoint,
-            voxel_size=args.voxel_size,
-            feats=FEATS,
             num_classes=NUM_CLASSES,
             labels_available=True,
-            transform=TRANSFORMS,
-            hyperset=True,
-            corrected=args.corrected
-        )
+            corrected=args.corrected,
+            hyperset=True
+            )
 
         print("Validation Set:")
-        VAL_DATASET = AMTCDataset(
+        VAL_DATASET = AMTCDatasetCNN(
             areas=val_areas,
             data_root=ROOT,
-            num_point=args.npoint,
-            voxel_size=args.voxel_size,
-            feats=FEATS,
             num_classes=NUM_CLASSES,
             labels_available=True,
-            hyperset=True,
-            corrected=args.corrected
+            corrected=args.corrected,
+            hyperset=True
         )
 
         print("Testing Set:")
-        TEST_DATASET = AMTCDataset(
+        TEST_DATASET = AMTCDatasetCNN(
             areas=test_areas,
             data_root=ROOT,
-            num_point=args.npoint,
-            voxel_size=args.voxel_size,
-            feats=FEATS,
             num_classes=NUM_CLASSES,
             labels_available=True,
-            hyperset=True,
-            corrected=args.corrected
-        )
+            corrected=args.corrected,
+            hyperset=True
+        )   
     else:
         print("Train Set:")
-        TRAIN_DATASET = AMTCDataset(
+        TRAIN_DATASET = AMTCDatasetCNN(
             areas=train_areas,
             data_root=ROOT,
-            num_point=args.npoint,
-            voxel_size=args.voxel_size,
-            feats=FEATS,
             num_classes=NUM_CLASSES,
             labels_available=True,
-            transform=TRANSFORMS,
             corrected=args.corrected
             )
 
         print("Validation Set:")
-        VAL_DATASET = AMTCDataset(
+        VAL_DATASET = AMTCDatasetCNN(
             areas=val_areas,
             data_root=ROOT,
-            num_point=args.npoint,
-            voxel_size=args.voxel_size,
-            feats=FEATS,
             num_classes=NUM_CLASSES,
             labels_available=True,
             corrected=args.corrected
         )
 
         print("Testing Set:")
-        TEST_DATASET = AMTCDataset(
+        TEST_DATASET = AMTCDatasetCNN(
             areas=test_areas,
             data_root=ROOT,
-            num_point=args.npoint,
-            voxel_size=args.voxel_size,
-            feats=FEATS,
             num_classes=NUM_CLASSES,
             labels_available=True,
             corrected=args.corrected
-        )
-        
-    
+        )   
 
 
     NUM_FEATS = TRAIN_DATASET.num_feats
@@ -709,8 +687,9 @@ def main(args):
     train_acc_avg_history = []
     val_acc_avg_history = []    
 
-    classifier = MODEL.get_model(NUM_CLASSES, NUM_FEATS + 3, dropout = DROPOUT).cuda()  # +3 por las coordenadas normalizadas
+    classifier = MODEL.get_model(num_classes=NUM_CLASSES, num_feats=TRAIN_DATASET.num_feats, dropout=DROPOUT).cuda()
     criterion = MODEL.get_loss(ignore_index=-1).cuda()
+
 
     classifier.apply(inplace_relu)
 
@@ -834,76 +813,76 @@ def main(args):
         early_stopping = EarlyStoppingWithCheckpoints(patience=args.patience, min_delta=0, verbose=True)
 
         for epoch in range(start_epoch, args.epoch):
-            '''Train on chopped scenes'''
+            '''Train on voxel features'''
             log_string('**** Epoch %d (%d/%s) ****' % (global_epoch + 1, epoch + 1, args.epoch))
             lr = max(args.learning_rate * (args.lr_decay ** (epoch // args.step_size)), LEARNING_RATE_CLIP)
             log_string('Learning rate:%f' % lr)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
+
             momentum = MOMENTUM_ORIGINAL * (MOMENTUM_DECCAY ** (epoch // MOMENTUM_DECCAY_STEP))
             if momentum < 0.01:
                 momentum = 0.01
             print('BN momentum updated to: %f' % momentum)
             classifier = classifier.apply(lambda x: bn_momentum_adjust(x, momentum))
+
             num_batches = len(trainDataLoader)
             total_correct = 0
             total_seen = 0
-            loss_sum = 0
+            loss_sum = 0.0
             total_seen_class = [0 for _ in range(NUM_CLASSES)]
             total_correct_class = [0 for _ in range(NUM_CLASSES)]
             total_iou_deno_class = [0 for _ in range(NUM_CLASSES)]
-            classifier = classifier.train()
+            classifier.train()
 
-            for i, (points, target) in tqdm(enumerate(trainDataLoader), total=len(trainDataLoader), smoothing=0.9):
+            for i, (feats, labels) in tqdm(enumerate(trainDataLoader), total=len(trainDataLoader), smoothing=0.9):
                 optimizer.zero_grad()
 
-                points = points.data.numpy()
-                # Si tienes la función rotate_point_cloud_z en provider, puedes usarla. Si no, comenta la siguiente línea.
-                # points[:, :, :3] = provider.rotate_point_cloud_z(points[:, :, :3])
-                points = torch.Tensor(points)
-                points, target = points.float().cuda(), target.long().cuda()
-                points = points.transpose(2, 1)
+                # feats: [B, N, 5], labels: [B, N]
+                feats = feats.float().cuda()
+                labels = labels.long().cuda()
 
-                seg_pred, trans_feat = classifier(points)
-                seg_pred = seg_pred.contiguous().view(-1, NUM_CLASSES)
+                # [B, N, 5] -> [B, 5, N] para el modelo CNN
+                feats = feats.transpose(2, 1)
 
-                batch_label = target.view(-1, 1)[:, 0].cpu().data.numpy()
-                target = target.view(-1, 1)[:, 0]
-                loss = criterion(seg_pred, target, trans_feat, weights)
+                seg_pred, _ = classifier(feats)                       # [B, N, NUM_CLASSES]
+
+                # Loss (get_loss ya aplana y respeta ignore_index=-1)
+                loss = criterion(seg_pred, labels, weight=weights)
                 loss.backward()
                 optimizer.step()
+                loss_sum += loss.detach().item()
 
-                pred_choice = seg_pred.cpu().data.max(1)[1].numpy()
-                correct = np.sum(pred_choice == batch_label)
-                total_correct += correct
-                total_seen += target.shape[0]
-                loss_sum += loss
+                # Métricas (ignorar padding == -1)
+                seg_pred_flat = seg_pred.contiguous().view(-1, NUM_CLASSES)  # [B*N, C]
+                labels_flat = labels.view(-1)                                 # [B*N]
+                valid_mask = labels_flat != -1
 
-                for l in range(NUM_CLASSES):
-                    total_seen_class[l] += np.sum((batch_label == l))
-                    total_correct_class[l] += np.sum((pred_choice == l) & (batch_label == l))
-                    total_iou_deno_class[l] += np.sum(((pred_choice == l) | (batch_label == l)))
-        
-            log_string('Training mean loss: %f' % (loss_sum / num_batches))
-            train_loss_history.append(loss_sum.detach().cpu().numpy() / num_batches)
-            log_string('Training accuracy: %f' % (total_correct / float(total_seen)))
-            train_acc_history.append((total_correct / float(total_seen)))
-            train_acc_avg = np.mean(np.array(total_correct_class) / (np.array(total_seen_class, dtype=float) + 1e-6))
+                if valid_mask.any():
+                    pred_choice = seg_pred_flat.argmax(dim=1)                 # [B*N]
+                    correct = (pred_choice[valid_mask] == labels_flat[valid_mask]).sum().item()
+                    total_correct += correct
+                    total_seen += valid_mask.sum().item()
+
+                    # Por-clase
+                    for l in range(NUM_CLASSES):
+                        cls_mask = (labels_flat == l) & valid_mask
+                        total_seen_class[l] += cls_mask.sum().item()
+                        total_correct_class[l] += ((pred_choice == l) & cls_mask).sum().item()
+                        total_iou_deno_class[l] += (((pred_choice == l) | (labels_flat == l)) & valid_mask).sum().item()
+
+            log_string('Training mean loss: %f' % (loss_sum / max(1, num_batches)))
+            train_loss_history.append(loss_sum / max(1, num_batches))
+
+            train_overall_acc = (total_correct / float(total_seen)) if total_seen > 0 else 0.0
+            log_string('Training accuracy: %f' % train_overall_acc)
+            train_acc_history.append(train_overall_acc)
+
+            train_acc_avg = np.mean(
+                np.array(total_correct_class, dtype=float) / (np.array(total_seen_class, dtype=float) + 1e-6)
+            )
             log_string('Training avg class accuracy: %f' % train_acc_avg)
             train_acc_avg_history.append(train_acc_avg)
-            # No generamos métricas y gráficas aquí para reducir el tiempo de entrenamiento
-
-            # if epoch % 5 == 0:
-            #     logger.info('Save model...')
-            #     savepath = str(checkpoints_dir) + '/model.pth'
-            #     log_string('Saving at %s' % savepath)
-            #     state = {
-            #         'epoch': epoch,
-            #         'model_state_dict': classifier.state_dict(),
-            #         'optimizer_state_dict': optimizer.state_dict(),
-            #     }
-            #     torch.save(state, savepath)
-            #     log_string('Saving model....')
 
             '''Evaluate on validation set'''
             all_pred_labels = []
@@ -913,89 +892,103 @@ def main(args):
                 num_batches = len(valDataLoader)
                 total_correct = 0
                 total_seen = 0
-                loss_sum = 0
-                labelweights = np.zeros(NUM_CLASSES)
+                loss_sum = 0.0
+                labelweights = np.zeros(NUM_CLASSES, dtype=np.float64)
                 total_seen_class = [0 for _ in range(NUM_CLASSES)]
                 total_correct_class = [0 for _ in range(NUM_CLASSES)]
                 total_iou_deno_class = [0 for _ in range(NUM_CLASSES)]
-                classifier = classifier.eval()
+                classifier.eval()
 
                 log_string('---- EPOCH %03d VALIDATION ----' % (global_epoch + 1))
-                for i, (points, target) in tqdm(enumerate(valDataLoader), total=len(valDataLoader), smoothing=0.9):
-                    points = points.data.numpy()
-                    points = torch.Tensor(points)
-                    points, target = points.float().cuda(), target.long().cuda()
-                    points = points.transpose(2, 1)
+                for i, (feats, labels) in tqdm(enumerate(valDataLoader), total=len(valDataLoader), smoothing=0.9):
+                    feats = feats.float().cuda()
+                    labels = labels.long().cuda()
+                    feats = feats.transpose(2, 1)                           # [B, 5, N]
 
-                    seg_pred, trans_feat = classifier(points)
-                    pred_val = seg_pred.contiguous().cpu().data.numpy()
-                    seg_pred = seg_pred.contiguous().view(-1, NUM_CLASSES)
+                    seg_pred, _ = classifier(feats)                         # [B, N, C]
+                    loss = criterion(seg_pred, labels, weight=weights)
+                    loss_sum += loss.detach().item()
 
-                    batch_label = target.cpu().data.numpy()
-                    target = target.view(-1, 1)[:, 0]
-                    loss = criterion(seg_pred, target, trans_feat, weights)
-                    loss_sum += loss
+                    # Argmax y métricas con máscara
+                    pred_val = seg_pred.argmax(dim=2)                       # [B, N]
+                    labels_np = labels.detach().cpu().numpy()
+                    pred_np = pred_val.detach().cpu().numpy()
 
-                    pred_val = np.argmax(pred_val, 2)
-                    correct = np.sum((pred_val == batch_label))
-                    total_correct += correct
-                    total_seen += target.shape[0]
+                    # Aplanar
+                    labels_flat = labels_np.reshape(-1)
+                    pred_flat = pred_np.reshape(-1)
 
-                    tmp, _ = np.histogram(batch_label, range(NUM_CLASSES + 1))
+                    valid_mask = labels_flat != -1
+                    if np.any(valid_mask):
+                        correct = np.sum(pred_flat[valid_mask] == labels_flat[valid_mask])
+                        total_correct += correct
+                        total_seen += int(valid_mask.sum())
 
-                    labelweights += tmp
-                    all_pred_labels.append(pred_val.flatten())
-                    all_true_labels.append(batch_label.flatten())
+                        # Pesos por clase (solo válidos)
+                        tmp, _ = np.histogram(labels_flat[valid_mask], bins=NUM_CLASSES, range=(0, NUM_CLASSES))
+                        labelweights += tmp
 
-                    for l in range(NUM_CLASSES):
-                        total_seen_class[l] += np.sum((batch_label == l))
-                        total_correct_class[l] += np.sum((pred_val == l) & (batch_label == l))
-                        total_iou_deno_class[l] += np.sum(((pred_val == l) | (batch_label == l)))
+                        all_pred_labels.append(pred_flat[valid_mask])
+                        all_true_labels.append(labels_flat[valid_mask])
 
-                    total_iou_deno_class = np.maximum(total_iou_deno_class, 1e-6)
+                        # Por-clase
+                        for l in range(NUM_CLASSES):
+                            cls_gt = (labels_flat == l) & valid_mask
+                            total_seen_class[l] += int(cls_gt.sum())
+                            total_correct_class[l] += int(((pred_flat == l) & cls_gt).sum())
+                            total_iou_deno_class[l] += int((((pred_flat == l) | (labels_flat == l)) & valid_mask).sum())
 
-                labelweights = labelweights.astype(np.float32) / np.sum(labelweights.astype(np.float32))
-                print('total_correct_class: ', np.array(total_correct_class))
-                print('total_iou_deno_class: ', total_iou_deno_class)
+                labelweights = labelweights.astype(np.float32)
+                labelweights = labelweights / (labelweights.sum() + 1e-6)
 
-                mIoU = np.mean(np.array(total_correct_class) / total_iou_deno_class)
-                log_string('eval mean loss: %f' % (loss_sum / float(num_batches)))
+                # mIoU y accuracies
+                total_iou_deno_class = np.maximum(np.array(total_iou_deno_class, dtype=float), 1e-6)
+                mIoU = np.mean(np.array(total_correct_class, dtype=float) / total_iou_deno_class)
+
+                log_string('eval mean loss: %f' % (loss_sum / max(1, num_batches)))
                 log_string('eval point avg class IoU: %f' % (mIoU))
-                val_loss_history.append(loss_sum.detach().cpu().numpy() / float(num_batches))
+                val_loss_history.append(loss_sum / max(1, num_batches))
                 iou_history.append(mIoU)
-                log_string('eval point accuracy: %f' % (total_correct / float(total_seen)))
 
-                val_acc_history.append((total_correct / float(total_seen)))
-                val_acc_avg = np.mean(np.array(total_correct_class) / (np.array(total_seen_class, dtype=float) + 1e-6))
+                overall_acc = (total_correct / float(total_seen)) if total_seen > 0 else 0.0
+                log_string('eval point accuracy: %f' % (overall_acc))
+                val_acc_history.append(overall_acc)
+
+                val_acc_avg = np.mean(
+                    np.array(total_correct_class, dtype=float) / (np.array(total_seen_class, dtype=float) + 1e-6)
+                )
                 log_string('eval point avg class acc: %f' % (val_acc_avg))
                 val_acc_avg_history.append(val_acc_avg)
 
                 iou_per_class_str = '------- IoU --------\n'
                 for l in range(NUM_CLASSES):
+                    iou_l = (total_correct_class[l] / (total_iou_deno_class[l] + 1e-6))
+                    acc_l = (total_correct_class[l] / (total_seen_class[l] + 1e-6))
                     iou_per_class_str += 'class %s weight: %.3f, IoU: %.3f, acc: %.3f \n' % (
-                        seg_label_to_cat[l] + ' ' * (NUM_CLASSES + 1 - len(seg_label_to_cat[l])), labelweights[l],
-                        total_correct_class[l] / float(total_iou_deno_class[l]),
-                        total_correct_class[l] / (total_seen_class[l] + 1e-6))
+                        seg_label_to_cat[l] + ' ' * (NUM_CLASSES + 1 - len(seg_label_to_cat[l])),
+                        labelweights[l],
+                        iou_l, acc_l
+                    )
 
                 log_string(iou_per_class_str)
-                log_string('Eval mean loss: %f' % (loss_sum / num_batches))
-                log_string('Eval accuracy: %f' % (total_correct / float(total_seen)))
+                log_string('Eval mean loss: %f' % (loss_sum / max(1, num_batches)))
+                log_string('Eval accuracy: %f' % (overall_acc))
 
-                # Llamar al early stopping
+                # Early stopping (seguimos usando val_acc_avg como criterio)
                 best_epoch_acc = early_stopping(
                     val_acc_avg=val_acc_avg,
-                    epoch=epoch + 1,  # Sumamos 1 para que coincida con la época real
+                    epoch=epoch + 1,
                     model=classifier,
                     optimizer=optimizer,
                     checkpoints_dir=checkpoints_dir
                 )
 
-                # Verificar si debemos detener el entrenamiento
                 if early_stopping.early_stop:
                     log_string(f'Early stopping triggered after {early_stopping.patience} epochs without improvement.')
-                    break  # Salimos del bucle de entrenamiento
+                    break
 
             global_epoch += 1
+
 
         # Después del entrenamiento, guardamos la información del mejor modelo
         best_model_info_file = os.path.join(results_dir, 'best_model_info.txt')

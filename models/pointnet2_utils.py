@@ -83,31 +83,35 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     Return:
         group_idx: grouped points index, [B, S, nsample]
     """
-    device  = xyz.device
-    B, N, C = xyz.shape
-    _, S, _ = new_xyz.shape
-    
-    group_idx = torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat([B, S, 1])
-    sqrdists = square_distance(new_xyz, xyz)
-    
-    # B, S
-    min_idx=torch.min(sqrdists,dim=-1)[1]
-    min_idx=min_idx.unsqueeze(-1) 
-    # B, S, N
-    group_first = min_idx.repeat([1, 1, nsample])
+    device = xyz.device
+    B, N, C = xyz.shape  # get batch size, number of points, and channels
+    _, S, _ = new_xyz.shape  # get number of query points
 
-    group_idx[sqrdists > radius ** 2] = N
+    group_idx = torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat([B, S, 1])  # create indices for points
+    sqrdists = square_distance(new_xyz, xyz)  # compute squared distances
+    min_idx = torch.min(sqrdists, dim=-1)[1]  # get index of nearest point
+    min_idx = min_idx.unsqueeze(-1)  # add dimension
+    group_first = min_idx.repeat([1, 1, nsample])  # repeat nearest index nsample times
 
-    # B,S,N to B,S,n
-    group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample] 
+    group_idx[sqrdists > radius ** 2] = N  # set indices outside radius to N
 
-    mask = group_idx == N
-    group_idx[mask] = group_first[mask]
+    group_idx = group_idx.sort(dim=-1)[0]  # sort indices in increasing order
 
-    if group_idx.max()> N-1:
+    # Check if the sorted group_idx has less than nsample columns and pad if needed  # basic english comment
+    if group_idx.shape[2] < nsample:  # if not enough points
+        pad = group_idx[..., :1].expand(-1, -1, nsample - group_idx.shape[2])  # create padding with first column
+        group_idx = torch.cat([group_idx, pad], dim=-1)  # concatenate pad to group_idx
+    else:
+        group_idx = group_idx[:, :, :nsample]  # take first nsample columns
+
+    mask = group_idx == N  # create mask for padded positions  # basic english comment
+    group_idx[mask] = group_first[mask]  # fill padded positions with nearest index  # basic english comment
+
+    if group_idx.max() > N - 1:
         raise Exception('invalid indices')
 
     return group_idx
+
 
 
 def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):

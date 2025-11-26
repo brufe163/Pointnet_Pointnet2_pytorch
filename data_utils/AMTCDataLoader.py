@@ -5,13 +5,51 @@ from tqdm import tqdm
 from torch.utils.data import Dataset
 from scipy.spatial import cKDTree
 import open3d as o3d
-
+import torch 
 from data_utils.AMTCTransforms import *
+
+def analyze_voxelization_impact(points, voxel_size):
+    """
+    Analiza el impacto de la voxelización en términos de reducción de puntos
+    """
+    original_count = points.shape[0]
+    coord_range = np.ptp(points[:, :3], axis=0)  # Rango en cada dimensión (max - min)
+    
+    # Crear la nube de puntos para voxelizar
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+    
+    # Voxelizar
+    pcd_down = pcd.voxel_down_sample(voxel_size=voxel_size)
+    voxelized_count = len(pcd_down.points)
+    
+    # Cálculos
+    reduction_factor = original_count / voxelized_count if voxelized_count > 0 else 0
+    reduction_percentage = (1 - voxelized_count / original_count) * 100
+    
+    # Estimación teórica de voxels máximos
+    theoretical_max_voxels = np.prod(np.ceil(coord_range / voxel_size))
+    
+    # Densidad de ocupación de voxels
+    occupancy_rate = voxelized_count / theoretical_max_voxels * 100 if theoretical_max_voxels > 0 else 0
+    
+    return {
+        'original_points': original_count,
+        'voxelized_points': voxelized_count,
+        'reduction_factor': reduction_factor,
+        'reduction_percentage': reduction_percentage,
+        'coord_range': coord_range,
+        'voxel_size': voxel_size,
+        'theoretical_max_voxels': int(theoretical_max_voxels),
+        'occupancy_rate': occupancy_rate,
+        'voxel_volume': voxel_size ** 3,
+        'scene_volume': np.prod(coord_range)
+    }
 
 class AMTCDataset(Dataset):
     def __init__(self, areas, data_root='trainval_fullarea', num_point=4096, voxel_size=0.1, 
                 feats=['coord', 'color', 'intensity'], num_classes=2, labels_available=True, 
-                transform=None, hyperset=False, corrected = False):
+                transform=None, hyperset=False, corrected = False, frame = None):
         super().__init__()
 
         self.feats = feats
@@ -59,7 +97,10 @@ class AMTCDataset(Dataset):
         # Procesamos las áreas seleccionadas
         for area in tqdm(self.areas, total=len(self.areas)):
             area_path = os.path.join(data_root, area)
-            room_list = [room for room in os.listdir(area_path) if 'amtc_' in room and os.path.isdir(os.path.join(area_path, room))]
+            if frame is not None:
+                room_list = [room for room in os.listdir(area_path) if f'amtc_{frame}' in room and os.path.isdir(os.path.join(area_path, room))]
+            else:
+                room_list = [room for room in os.listdir(area_path) if 'amtc_' in room and os.path.isdir(os.path.join(area_path, room))]
             for room_name in room_list:
                 room_path = os.path.join(area_path, room_name)
                 if self.labels_available:
@@ -177,19 +218,8 @@ class AMTCDataset(Dataset):
 
     def load_features(self, feats, room_path, corrected):
 
-        if corrected:
-            feature_map = {
-            'coord': 'coord_corrected.npy',       # Coordenadas (N, 3)
-            'color': 'color.npy',       # Colores (N, 3)
-            'normal': 'normal.npy',     # Normales (N, 3)
-            'intensity': 'intensity.npy',  # Intensidad (N, 1)
-            'flow': 'flow.npy',          # Scene flow (N, 3)
-            'diff': 'diff_corrected.npy',          # Diferencia corregida (N, 1)
-            'diff_vectors': 'diff_vectors_corrected.npy', # Diferencia corregida (N, 3)
-            'interp': 'interp_corrected.npy'
-            }
-        else:
-            feature_map = {
+        # Mapas de archivos base y corregidos
+        base_feature_map = {
             'coord': 'coord.npy',       # Coordenadas (N, 3)
             'color': 'color.npy',       # Colores (N, 3)
             'normal': 'normal.npy',     # Normales (N, 3)
@@ -198,15 +228,39 @@ class AMTCDataset(Dataset):
             'diff': 'diff.npy',          # Diferencia  (N, 1)
             'diff_vectors': 'diff_vectors.npy', # Diferencia  (N, 3)
             'interp': 'interp.npy'
-            }
+        }
+        
+        corrected_feature_map = {
+            'coord': 'coord.npy',       # Coordenadas (N, 3)
+            'color': 'color.npy',       # Colores (N, 3)
+            'normal': 'normal.npy',     # Normales (N, 3)
+            'intensity': 'intensity.npy',  # Intensidad (N, 1)
+            'flow': 'flow.npy',          # Scene flow (N, 3)
+            'diff': 'diff_corrected.npy',          # Diferencia corregida (N, 1)
+            'diff_vectors': 'diff_vectors_corrected.npy', # Diferencia corregida (N, 3)
+            'interp': 'interp_corrected.npy'
+        }
 
         loaded_features = []
         coord = None
         position = 0  # Posición actual en la concatenación de características
 
         for feat in feats:
-            if feat in feature_map:
-                file_path = os.path.join(room_path, feature_map[feat])
+            if feat in base_feature_map:
+                # Si corrected está activado, intentar cargar la versión corregida primero
+                if corrected and feat in corrected_feature_map:
+                    corrected_file_path = os.path.join(room_path, corrected_feature_map[feat])
+                    base_file_path = os.path.join(room_path, base_feature_map[feat])
+                    
+                    # Intentar cargar el archivo corregido, si no existe usar el base
+                    if os.path.exists(corrected_file_path):
+                        file_path = corrected_file_path
+                    else:
+                        file_path = base_file_path
+                else:
+                    # Usar la versión base
+                    file_path = os.path.join(room_path, base_feature_map[feat])
+                
                 data = np.load(file_path)
                 
                 # Ajuste de dimensión si es necesario
@@ -273,7 +327,6 @@ class AMTCDataset(Dataset):
         return len(self.room_points)
 
 
-
 import matplotlib.pyplot as plt
 import open3d as o3d
 
@@ -328,17 +381,183 @@ def vis_result(coord, classes):
     vis.run()  # Iniciar el visualizador
     vis.destroy_window()
 
-if __name__ == '__main__':
-    curr_dir = os.getcwd()
-    parent_dir = os.path.abspath(os.path.join(curr_dir, os.pardir))
+# if __name__ == '__main__':
+#     curr_dir = os.getcwd()
+#     parent_dir = os.path.abspath(os.path.join(curr_dir, os.pardir))
 
-    data_root = os.path.join(parent_dir, 'data', 'processed_ouster_data/grabaciones_08_11')
-    num_point, voxel_size= 5000, 0.1
+#     data_root = os.path.join(parent_dir, 'data', 'processed_ouster_data/grabaciones_08_11')
+#     num_point, voxel_size= 5000, 0.1
 
-    point_data = AMTCDataset(split='train', data_root=data_root, num_point=num_point, val_test_area=[51, 61], voxel_size = voxel_size, feats = ['coord', 'intensity', 'diff'], num_classes = 2)
-    data, labels, r_idx = point_data.__getitem__(0, return_index = True)
-    print(f'Viendo escena {r_idx}...')
-    print('data shape: ', np.shape(data))
-    print('labels: ', np.unique(labels, return_counts=True))
-    vis_result(data[:,:3],labels)   # real
+#     point_data = AMTCDataset(split='train', data_root=data_root, num_point=num_point, val_test_area=[51, 61], voxel_size = voxel_size, feats = ['coord', 'intensity', 'diff'], num_classes = 2)
+#     data, labels, r_idx = point_data.__getitem__(0, return_index = True)
+#     print(f'Viendo escena {r_idx}...')
+#     print('data shape: ', np.shape(data))
+#     print('labels: ', np.unique(labels, return_counts=True))
+#     vis_result(data[:,:3],labels)   # real
 
+# if __name__ == '__main__':
+#     import json
+#     with open('/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/hypersets.json', 'r') as f:  
+#             sets_dict = json.load(f) 
+#         test_areas = sets_dict["test_set"]
+#     ROOT = '/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/experimentos
+#     TEST_DATASET = AMTCDataset(
+#             areas=test_areas,
+#             data_root=ROOT,
+#             num_point=args.npoint,
+#             voxel_size=args.voxel_size,
+#             feats=FEATS,
+#             num_classes=NUM_CLASSES,
+#             labels_available=True,
+#             hyperset=True,
+#             corrected=args.corrected
+#         )
+
+# Código de análisis de voxelización
+# def test_voxelization_analysis():
+#     """
+#     Función para probar el análisis de voxelización
+#     """
+#     print("=== ANÁLISIS DE VOXELIZACIÓN ===")
+    
+#     # Simular algunos puntos para demostrar
+#     ROOT = '/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos'
+    
+#     try:
+#         # Crear dataset de prueba
+#         test_dataset = AMTCDataset(
+#             areas=[1],  # Solo un área para prueba
+#             data_root=os.path.join(ROOT, 'interior1'),
+#             num_point=4096,
+#             voxel_size=0.000001,  # Voxel pequeño para comparar
+#             feats=['coord', 'intensity'],
+#             num_classes=2,
+#             labels_available=True
+#         )
+        
+#         # Obtener un sample
+#         points, labels = test_dataset[100]
+#         coords = points[:, :3]  # Solo coordenadas
+        
+#         print(f"\nEjemplo con un frame:")
+#         print(f"Coordenadas van de {coords.min(axis=0)} a {coords.max(axis=0)}")
+        
+#         # Probar diferentes tamaños de voxel
+#         voxel_sizes = [0.1, 0.2, 0.5, 1.0]
+        
+#         for vs in voxel_sizes:
+#             analysis = analyze_voxelization_impact(points, vs)
+#             print(f"\n--- Voxel Size: {vs} ---")
+#             print(f"Puntos originales: {analysis['original_points']:,}")
+#             print(f"Puntos voxelizados: {analysis['voxelized_points']:,}")
+#             print(f"Factor de reducción: {analysis['reduction_factor']:.2f}x")
+#             print(f"Reducción porcentual: {analysis['reduction_percentage']:.1f}%")
+#             print(f"Rango de coordenadas: {analysis['coord_range']}")
+#             print(f"Voxels teóricos máximos: {analysis['theoretical_max_voxels']:,}")
+#             print(f"Tasa de ocupación: {analysis['occupancy_rate']:.1f}%")
+#             print(f"Volumen de voxel: {analysis['voxel_volume']:.3f}")
+#             print(f"Volumen de escena: {analysis['scene_volume']:.3f}")
+            
+#     except Exception as e:
+#         print(f"Error en el análisis: {e}")
+#         print("Para ejecutar el análisis, asegúrate de tener datos en la ruta especificada")
+
+# # Descomenta la siguiente línea para ejecutar el análisis:
+# test_voxelization_analysis()
+
+
+class AMTCDatasetCNN(Dataset):
+    def __init__(self, areas, data_root, num_classes=2, labels_available=True, corrected=False, frame=None, hyperset=False):
+        super().__init__()
+        self.labels_available = labels_available
+        self.corrected = corrected
+        self.num_classes = num_classes
+        self.data_root = data_root
+        
+        if hyperset:
+            selected_areas = []
+            for area_path in areas:
+                # area_path es algo como "experimento1/Area_1"
+                full_path = os.path.join(data_root, area_path)  # data_root/experimento1/Area_1
+                if os.path.isdir(full_path):  # check if it is a directory
+                    selected_areas.append(area_path)
+
+            assert selected_areas, "No se encontraron áreas válidas con las rutas especificadas."
+
+            self.areas = selected_areas
+        else:
+
+
+            # Cargamos las carpetas del dataset
+            all_areas = sorted([area for area in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, area)) and 'Area_' in area])
+            
+            # Convertimos los números de áreas en nombres
+            areas = [f"Area_{i}" for i in areas]
+            
+            # Filtramos las áreas disponibles
+            self.areas = [area for area in all_areas if area in areas]
+            assert self.areas, "No se encontraron áreas válidas con los números especificados."
+
+        print("Áreas seleccionadas:", self.areas)
+
+        # sufijo para archivos
+        self.suffix = "_corrected" if corrected else ""
+
+        self.samples = []
+        for area in self.areas:
+            area_path = os.path.join(data_root, area)
+            room_list = [r for r in os.listdir(area_path) if 'amtc_' in r]
+            if frame is not None:
+                room_list = [r for r in room_list if f"amtc_{frame}" in r]
+
+            for room_name in room_list:
+                room_path = os.path.join(area_path, room_name)
+                feat_path = os.path.join(room_path, f"voxel_feats{self.suffix}.npy")
+                label_path = os.path.join(room_path, f"voxel_labels{self.suffix}.npy")
+                if os.path.exists(feat_path):
+                    self.samples.append((feat_path, label_path if labels_available else None))
+
+        print(f"Dataset CNN: {len(self.samples)} samples loaded from {len(self.areas)} areas")
+
+        # número de features por voxel
+        self.num_feats = 5
+
+        # calcular el número máximo de voxels en el dataset (para padding)
+        if self.samples:
+            self.num_point = max(np.load(f).shape[0] for f, _ in self.samples)
+        else:
+            self.num_point = 0
+
+        # calcular labelweights
+        if self.labels_available:
+            all_labels = []
+            for _, label_path in self.samples:
+                if label_path and os.path.exists(label_path):
+                    all_labels.append(np.load(label_path))
+            if all_labels:
+                hist, _ = np.histogram(np.concatenate(all_labels), bins=num_classes, range=(0, num_classes))
+                hist = hist.astype(np.float32)
+                hist /= np.sum(hist)
+                self.labelweights = np.amax(hist) / hist
+                self.labelweights = self.labelweights / np.sum(self.labelweights)
+                print("Labelweights:", self.labelweights)
+            else:
+                self.labelweights = None
+        else:
+            self.labelweights = None
+
+    def __getitem__(self, idx):
+        feat_path, label_path = self.samples[idx]
+        feats = np.load(feat_path)  # (N, 5)
+        feats = torch.from_numpy(feats).float()
+
+        if self.labels_available and label_path is not None and os.path.exists(label_path):
+            labels = np.load(label_path).astype(np.int64)
+            labels = torch.from_numpy(labels)
+        else:
+            labels = torch.full((feats.shape[0],), -1, dtype=torch.long)  # padding con -1
+
+        return feats, labels
+
+    def __len__(self):
+        return len(self.samples)

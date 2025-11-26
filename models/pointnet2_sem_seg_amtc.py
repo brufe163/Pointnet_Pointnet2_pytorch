@@ -1,6 +1,8 @@
 import torch.nn as nn
 import torch.nn.functional as F
 from models.pointnet2_utils import PointNetSetAbstraction,PointNetFeaturePropagation
+from torchsummary import summary
+
 
 class get_model(nn.Module):
     def __init__(self, num_classes, num_feats, dropout = 0.5):
@@ -86,6 +88,10 @@ class get_loss(nn.Module):
 
 if __name__ == '__main__':
     import  torch
-    model = get_model(2,4)
-    xyz = torch.rand(6, 4, 2048)
-    (model(xyz))
+    model = get_model(2,4).cuda()
+
+
+    summary(model, input_size=(4, 2048))  # 4 canales de entrada, 2048 puntos
+
+    # xyz = torch.rand(6, 4, 2048)
+    # (model(xyz))

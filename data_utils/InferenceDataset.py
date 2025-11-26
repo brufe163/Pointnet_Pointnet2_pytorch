@@ -11,7 +11,32 @@ import open3d as o3d
 # LÓGICA PARA DIFF
 ###########################################
 
-def compute_magnitude_and_differences(current_points, prev_points, device, batch_size=1000, min_distance_threshold=0.01):
+def compute_magnitude(current_points, prev_points, device, batch_size=1000, min_distance_threshold=0.01):
+    prev_coords = torch.tensor(prev_points, device=device, dtype=torch.float32)
+    current_coords = torch.tensor(current_points, device=device, dtype=torch.float32)
+
+    num_points = current_coords.shape[0]
+    magnitudes = torch.zeros((num_points,), device=device)
+
+    for start in range(0, num_points, batch_size):
+        end = start + batch_size
+        batch_current = current_coords[start:end]
+        distances = torch.cdist(batch_current.unsqueeze(0), prev_coords.unsqueeze(0)).squeeze(0)
+        min_distances, indices = distances.min(dim=1)
+
+        valid_mask = min_distances > min_distance_threshold
+        if valid_mask.sum() == 0:
+            continue
+
+        closest_prev = prev_coords[indices[valid_mask]]
+        batch_diff = batch_current[valid_mask] - closest_prev
+        batch_mag = torch.norm(batch_diff, dim=1)
+
+        magnitudes[start:end][valid_mask] = batch_mag
+
+    return magnitudes.cpu().numpy()
+
+def compute_differences(current_points, prev_points, device, batch_size=1000, min_distance_threshold=0.01):
     prev_coords = torch.tensor(prev_points, device=device, dtype=torch.float32)
     current_coords = torch.tensor(current_points, device=device, dtype=torch.float32)
 
@@ -31,12 +56,10 @@ def compute_magnitude_and_differences(current_points, prev_points, device, batch
 
         closest_prev = prev_coords[indices[valid_mask]]
         batch_diff = batch_current[valid_mask] - closest_prev
-        batch_mag = torch.norm(batch_diff, dim=1)
-
-        magnitudes[start:end][valid_mask] = batch_mag
         differences[start:end][valid_mask] = batch_diff
 
-    return magnitudes.cpu().numpy(), differences.cpu().numpy()
+    return differences.cpu().numpy()
+
 
 ###########################################
 # LÓGICA PARA TVAI
@@ -107,7 +130,7 @@ def compute_distances_and_knn(current_points, prev_points, device, batch_size=10
 class InferenceDataset(Dataset):
     def __init__(self,
                  data_path,
-                 feats=['coord', 'intensity', 'diff', 'interp'],
+                 feats=['coord', 'intensity', 'diff', 'diff_vectors', 'interp'],
                  voxel_size=None,
                  transform=None,
                  device='cpu',
@@ -128,8 +151,8 @@ class InferenceDataset(Dataset):
         self.hidden_dim = hidden_dim
         self.min_dist_diff = min_dist_diff
 
-        # Ver si necesitamos almacenar el frame previo (solo si diff o interp están en feats)
-        self.store_prev_frame = any(x in feats for x in ['diff', 'interp'])
+        # Ver si necesitamos almacenar el frame previo (solo si diff, diff_vectors o interp están en feats)
+        self.store_prev_frame = any(x in feats for x in ['diff', 'diff_vectors', 'interp'])
         # Variables para almacenar el frame anterior en RAM
         self.prev_coords = None
         self.prev_intensity = None
@@ -148,14 +171,14 @@ class InferenceDataset(Dataset):
         # Listar subcarpetas
         self.subfolders = sorted([
             os.path.join(self.data_path, d) for d in os.listdir(self.data_path)
-            if os.path.isdir(os.path.join(self.data_path, d))
+            if os.path.isdir(os.path.join(self.data_path, d)) and d.startswith('amtc_')
         ])
 
     def __len__(self):
         return len(self.subfolders)
 
     def __getitem__(self, idx):
-        current_folder = self.subfolders[idx]
+        current_folder = self.subfolders[idx] 
 
         # 1) Cargar coord
         coord_path = os.path.join(current_folder, "coord.npy")
@@ -165,7 +188,7 @@ class InferenceDataset(Dataset):
 
         # 2) Cargar intensity si lo pides en feats
         intensity = None
-        if 'intensity' in self.feats:
+        if 'intensity' in self.feats or 'interp' in self.feats:
             intensity_path = os.path.join(current_folder, "intensity.npy")
             if os.path.exists(intensity_path):
                 intensity = np.load(intensity_path).reshape(-1, 1)
@@ -178,11 +201,12 @@ class InferenceDataset(Dataset):
         loaded_features = []
         if 'coord' in self.feats:
             loaded_features.append(coords)
-        if 'intensity' in self.feats and intensity is not None:
+        if ('intensity' in self.feats and intensity is not None) or 'interp' in self.feats:
             loaded_features.append(intensity)
 
-        # 5) diff
+        # 5) diff y diff_vectors
         diff = None
+        diff_vectors = None
         if 'diff' in self.feats:
             if idx == 0:
                 # Primer frame => 0
@@ -190,7 +214,7 @@ class InferenceDataset(Dataset):
             else:
                 # Si tenemos self.prev_coords en RAM, la usamos
                 if self.prev_coords is not None:
-                    mag, _ = compute_magnitude_and_differences(
+                    mag= compute_magnitude(
                         current_points=coords,
                         prev_points=self.prev_coords,
                         device=self.device,
@@ -200,19 +224,44 @@ class InferenceDataset(Dataset):
                 else:
                     # Si por algún motivo es None, fallback a 0
                     diff = np.zeros((coords.shape[0], 1))
-
             loaded_features.append(diff)
-
+        if 'diff_vectors' in self.feats:
+            if idx == 0:
+                # Primer frame => 0
+                diff_vectors = np.zeros((coords.shape[0], 3))
+            else:
+                # Si tenemos self.prev_coords en RAM, la usamos
+                if self.prev_coords is not None:
+                    vec= compute_differences(
+                        current_points=coords,
+                        prev_points=self.prev_coords,
+                        device=self.device,
+                        min_distance_threshold=self.min_dist_diff
+                    )
+                    diff_vectors = vec
+                else:
+                    # Si por algún motivo es None, fallback a 0
+                    diff_vectors = np.zeros((coords.shape[0], 1))
+            loaded_features.append(diff_vectors)
         # 6) interp
         interp = None
         if 'interp' in self.feats and self.tvai_model is not None:
+            #print(intensity)
             if idx == 0:
                 # Primer frame => 0
                 interp = np.zeros((coords.shape[0], 1))
+                
             else:
+                # print(f"self.prev_coords: {self.prev_coords}")
+                # print(f"intensity: {intensity}")
+                # print(f"self.prev_intensity: {self.prev_intensity}")
+                # print(self.store_prev_frame)
+                # if idx == 10:
+                #     hola
                 if (self.prev_coords is not None and
                     intensity is not None and
                     self.prev_intensity is not None):
+
                     # KNN y TVAI
                     knn_dist, knn_idx = compute_distances_and_knn(
                         current_points=coords,
@@ -250,7 +299,7 @@ class InferenceDataset(Dataset):
         # sólo si store_prev_frame es True
         if self.store_prev_frame:
             self.prev_coords = coords  # guardamos el frame actual
-            if 'intensity' in self.feats:
+            if 'intensity' in self.feats or 'interp' in self.feats:
                 self.prev_intensity = intensity
             else:
                 self.prev_intensity = None
@@ -274,6 +323,36 @@ class InferenceDataset(Dataset):
         voxel_points = np.concatenate([voxel_coords, voxel_feats], axis=1)
         return voxel_points
 
+def process_inference(data_path, feats, voxel_size=0.5, device='cuda', alpha=0.5, beta=2.0, k=8, hidden_dim=128, min_dist_diff=0.01):
+        dataset = InferenceDataset(
+            data_path=data_path,
+            feats=feats,
+            voxel_size=voxel_size,
+            device=device,
+            alpha=alpha,
+            beta=beta,
+            k=k,
+            hidden_dim=hidden_dim,
+            min_dist_diff=min_dist_diff
+        )
+
+        total_start = time.time()
+        frame_times = []
+
+        for i in tqdm(range(len(dataset)), desc="Procesando frames"):
+            start_frame = time.time()
+            points, _ = dataset[i]
+            # Aquí tu lógica de inferencia con points
+            end_frame = time.time()
+            frame_times.append(end_frame - start_frame)
+
+        total_end = time.time()
+        total_time = total_end - total_start
+        avg_time = sum(frame_times) / len(frame_times) if frame_times else 0
+
+        print(f"\nTiempo total: {total_time:.4f} s")
+        print(f"Tiempo promedio por frame: {avg_time:.4f} s")
+        print(f"Frames procesados: {len(dataset)}")
 
 #########################
 # EJEMPLO DE USO
@@ -282,36 +361,46 @@ if __name__ == "__main__":
     import time
     from tqdm import tqdm
 
-    data_path = "/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/caren/Area_1"
+    # Lista de áreas y sus rutas
+    areas = {
+        "Peldehue_Area_1": "/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/peldehue/Area_1",
+        "Caren_Area_3": "/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/caren/Area_3",
+        "Interior1_Area_1": "/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/interior1/Area_1",
+        "Interior2_Area_1": "/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/interior2/Area_1",
+        "Exterior1_Area_1": "/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/exterior1/Area_1",
+        "Exterior2_Area_1": "/home/bruno/repos/tesis/Pointnet_Pointnet2_pytorch/data/experimentos/exterior2/Area_1",
+    }
 
-    feats = ['coord', 'diff']  # Ajusta según tu caso
+    # Lista de combinaciones de características
+    feature_combinations = [
+        # ['coord', 'intensity'],
+        # ['coord', 'diff'],
+        # ['coord', 'diff_vectors'],
+        ['coord', 'interp'],
+        # ['coord', 'intensity', 'diff'],
+        # ['coord', 'intensity', 'diff_vectors'],
+        # ['coord', 'intensity', 'interp']
+    ]
 
-    dataset = InferenceDataset(
-        data_path=data_path,
-        feats=feats,
-        voxel_size=0.1,
-        device='cuda',   # o 'cpu'
-        alpha=0.5,
-        beta=2.0,
-        k=8,
-        hidden_dim=128,
-        min_dist_diff=0.01
-    )
+    # Diccionario para almacenar los tiempos
+    report = {}
 
-    total_start = time.time()
-    frame_times = []
+    # Procesar cada área y combinación de características
+    for area_name, data_path in areas.items():
+        report[area_name] = {}
+        for features in feature_combinations:
+            print(f"Procesando área: {area_name}, características: {features}")
+            start_time = time.time()
+            process_inference(data_path, features)
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            report[area_name][tuple(features)] = elapsed_time
 
-    for i in tqdm(range(len(dataset)), desc="Procesando frames"):
-        start_frame = time.time()
-        points, _ = dataset[i]
-        # Aquí tu lógica de inferencia con points
-        end_frame = time.time()
-        frame_times.append(end_frame - start_frame)
+    # Mostrar informe final
+    print("\n==================== INFORME FINAL ====================")
+    for area_name, feature_times in report.items():
+        print(f"\nÁrea: {area_name}")
+        for features, elapsed_time in feature_times.items():
+            print(f"  Características: {features} -> Tiempo: {elapsed_time:.4f} s")
 
-    total_end = time.time()
-    total_time = total_end - total_start
-    avg_time = sum(frame_times) / len(frame_times) if frame_times else 0
 
-    print(f"\nTiempo total: {total_time:.4f} s")
-    print(f"Tiempo promedio por frame: {avg_time:.4f} s")
-    print(f"Frames procesados: {len(dataset)}")
